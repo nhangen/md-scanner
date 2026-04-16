@@ -1,0 +1,17 @@
+{
+  "name": "md-scanner",
+  "version": "1.0.0",
+  "description": "Behavioral markdown documentation scanner for Claude Code",
+  "scripts": {
+    "typecheck": "bun tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/bun": "latest"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "md-scanner",
+  "version": "1.0.0",
+  "description": "Scans markdown documentation files against actual behavioral data to find what's missing. Recommends additions to CLAUDE.md, rules, memory, and skills.",
+  "author": {
+    "name": "nhangen"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-md",
+    "documentation",
+    "analytics",
+    "context",
+    "efficiency"
+  ]
+}
