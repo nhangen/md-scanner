@@ -1,10 +1,12 @@
 {
   "name": "md-scanner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Behavioral markdown documentation scanner for Claude Code",
   "scripts": {
     "typecheck": "bun tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "analyze": "bun scripts/analyzer-cli.ts",
+    "setup-cron": "bun scripts/setup-cron.ts"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

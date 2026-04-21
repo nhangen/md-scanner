@@ -21,5 +21,8 @@ SCRIPT_DIR="$(cd "$HOOK_DIR/../scripts" && pwd)"
 
 echo "$INPUT" | "$BUN" "$SCRIPT_DIR/tagger-cli.ts" 2>/dev/null || true
 
+# Launch analyzer in background — not constrained by hook timeout
+nohup "$BUN" "$SCRIPT_DIR/analyzer-cli.ts" --mode=hook >> "$HOME/.claude/context-gaps/analyzer.log" 2>&1 &
+
 echo '{}'
 exit 0
