@@ -1,0 +1,627 @@
+import { spawnSync } from "child_process";
+import {
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  readdirSync,
+  statSync,
+  mkdirSync,
+} from "fs";
+import { join, basename, dirname } from "path";
+import {
+  ANALYZER_SCHEMA_VERSION,
+  type SessionExtract,
+  type UserMessage,
+  type AnalyzerIndex,
+  type ProjectAggregate,
+  type DetectorFinding,
+  type TrendDirection,
+  type RecommendedSurface,
+} from "./types";
+
+// ---------------------------------------------------------------------------
+// Filtering
+// ---------------------------------------------------------------------------
+
+const OBSERVER_PATH_MARKERS = ["observer-sessions", ".claude-mem"];
+const OBSERVER_TOOLS = new Set(["ToolSearch", "TaskCreate", "TaskUpdate", "Skill"]);
+
+export function isObserverSession(extract: SessionExtract): boolean {
+  if (OBSERVER_PATH_MARKERS.some((m) => extract.project_path.includes(m))) return true;
+  return extract.extracts.tool_sequence.some((t) => OBSERVER_TOOLS.has(t));
+}
+
+const NOISE_WORDS = new Set(["yes", "no", "sure", "go", "ok", "1", "2", "3"]);
+
+export function cleanUserMessages(messages: UserMessage[]): UserMessage[] {
+  return messages.filter((m) => {
+    const t = m.text;
+    if (t.startsWith("Stop hook feedback:")) return false;
+    if (t.includes("<local-command-caveat>")) return false;
+    if (t.includes("<command-name>")) return false;
+    if (t.includes("<local-command-stdout>")) return false;
+    if (NOISE_WORDS.has(t.trim().toLowerCase())) return false;
+    return true;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Path utilities
+// ---------------------------------------------------------------------------
+
+const canonCache = new Map<string, string>();
+
+export function canonicalizePath(projectPath: string): string {
+  const cached = canonCache.get(projectPath);
+  if (cached !== undefined) return cached;
+
+  try {
+    const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: projectPath,
+      timeout: 500,
+    });
+    if (result.status === 0 && result.stdout) {
+      const resolved = result.stdout.toString().trim();
+      canonCache.set(projectPath, resolved);
+      return resolved;
+    }
+  } catch {
+    // fall through
+  }
+  canonCache.set(projectPath, projectPath);
+  return projectPath;
+}
+
+export function fnv1aHash4(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  const hex = (hash >>> 0).toString(16).padStart(8, "0");
+  return hex.slice(-4);
+}
+
+export function projectSlug(canonicalPath: string): string {
+  const base = basename(canonicalPath)
+    .replace(/[^a-z0-9]/gi, "-")
+    .toLowerCase();
+  return `${base}-${fnv1aHash4(canonicalPath)}`;
+}
+
+export function rleCompress(sequence: string[]): string {
+  if (sequence.length === 0) return "";
+  const parts: string[] = [];
+  let current = sequence[0];
+  let count = 1;
+  for (let i = 1; i < sequence.length; i++) {
+    if (sequence[i] === current) {
+      count++;
+    } else {
+      parts.push(count > 1 ? `${current}*${count}` : current);
+      current = sequence[i];
+      count = 1;
+    }
+  }
+  parts.push(count > 1 ? `${current}*${count}` : current);
+  return parts.join(", ");
+}
+
+// ---------------------------------------------------------------------------
+// Index management
+// ---------------------------------------------------------------------------
+
+export function loadIndex(indexPath: string): AnalyzerIndex {
+  try {
+    const raw = readFileSync(indexPath, "utf-8");
+    return JSON.parse(raw) as AnalyzerIndex;
+  } catch {
+    return {
+      schema_version: ANALYZER_SCHEMA_VERSION,
+      last_run: "",
+      processed_files: {},
+    };
+  }
+}
+
+export function saveIndex(indexPath: string, index: AnalyzerIndex): void {
+  const tmp = indexPath + ".tmp";
+  writeFileSync(tmp, JSON.stringify(index, null, 2));
+  renameSync(tmp, indexPath);
+}
+
+// ---------------------------------------------------------------------------
+// Pending file loading
+// ---------------------------------------------------------------------------
+
+export function loadNewPendingFiles(
+  stateDir: string,
+  index: AnalyzerIndex,
+  forceAll: boolean,
+): { extracts: SessionExtract[]; updatedIndex: AnalyzerIndex } {
+  const extracts: SessionExtract[] = [];
+  const updatedIndex: AnalyzerIndex = {
+    ...index,
+    processed_files: { ...index.processed_files },
+  };
+
+  let files: string[];
+  try {
+    files = readdirSync(stateDir).filter((f) => f.startsWith("pending-") && f.endsWith(".jsonl"));
+  } catch {
+    return { extracts, updatedIndex };
+  }
+
+  for (const file of files) {
+    const fullPath = join(stateDir, file);
+    let stat;
+    try {
+      stat = statSync(fullPath);
+    } catch {
+      continue;
+    }
+
+    const mtime = Math.floor(stat.mtimeMs);
+    const size = stat.size;
+    const prev = index.processed_files[file];
+    if (!forceAll && prev && prev.mtime === mtime && prev.size === size) {
+      continue;
+    }
+
+    try {
+      const raw = readFileSync(fullPath, "utf-8");
+      const firstLine = raw.split("\n")[0];
+      if (firstLine.trim()) {
+        const extract = JSON.parse(firstLine) as SessionExtract;
+        extracts.push(extract);
+      }
+    } catch {
+      continue;
+    }
+
+    updatedIndex.processed_files[file] = { mtime, size };
+  }
+
+  return { extracts, updatedIndex };
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation
+// ---------------------------------------------------------------------------
+
+export function buildProjectAggregates(
+  extracts: SessionExtract[],
+): Map<string, ProjectAggregate> {
+  const map = new Map<string, ProjectAggregate>();
+
+  for (const ext of extracts) {
+    const canonical = canonicalizePath(ext.project_path);
+    let agg = map.get(canonical);
+    if (!agg) {
+      agg = {
+        project_path: ext.project_path,
+        canonical_path: canonical,
+        session_count: 0,
+        session_ids: [],
+        timestamps: [],
+        file_read_sessions: {},
+        bash_error_sessions: {},
+        edit_sets: [],
+        out_of_project_sessions: {},
+        user_message_corpus: [],
+        high_cost_sessions: [],
+      };
+      map.set(canonical, agg);
+    }
+
+    agg.session_count++;
+    agg.session_ids.push(ext.session_id);
+    agg.timestamps.push(ext.timestamp);
+
+    for (const [filePath, _count] of Object.entries(ext.extracts.file_read_counts)) {
+      if (!agg.file_read_sessions[filePath]) agg.file_read_sessions[filePath] = [];
+      if (!agg.file_read_sessions[filePath].includes(ext.session_id)) {
+        agg.file_read_sessions[filePath].push(ext.session_id);
+      }
+    }
+
+    for (const cmd of ext.extracts.bash_commands) {
+      if (cmd.is_error) {
+        const firstWord = cmd.cmd.trim().split(/\s+/)[0];
+        if (!agg.bash_error_sessions[firstWord]) agg.bash_error_sessions[firstWord] = [];
+        if (!agg.bash_error_sessions[firstWord].includes(ext.session_id)) {
+          agg.bash_error_sessions[firstWord].push(ext.session_id);
+        }
+      }
+    }
+
+    if (ext.extracts.file_edit_set.length > 0) {
+      agg.edit_sets.push({ session_id: ext.session_id, files: ext.extracts.file_edit_set });
+    }
+
+    for (const oopPath of ext.extracts.out_of_project_paths) {
+      if (!agg.out_of_project_sessions[oopPath]) agg.out_of_project_sessions[oopPath] = [];
+      if (!agg.out_of_project_sessions[oopPath].includes(ext.session_id)) {
+        agg.out_of_project_sessions[oopPath].push(ext.session_id);
+      }
+    }
+
+    const cleaned = cleanUserMessages(ext.extracts.user_messages);
+    for (const msg of cleaned) {
+      agg.user_message_corpus.push({ session_id: ext.session_id, text: msg.text });
+    }
+
+    let totalInput = 0;
+    let totalOutput = 0;
+    for (const tt of ext.extracts.turn_tokens) {
+      totalInput += tt.input_tokens;
+      totalOutput += tt.output_tokens;
+    }
+    agg.high_cost_sessions.push({
+      session_id: ext.session_id,
+      total_input: totalInput,
+      total_output: totalOutput,
+      tool_sequence: ext.extracts.tool_sequence,
+    });
+  }
+
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// Trend
+// ---------------------------------------------------------------------------
+
+export function computeTrend(
+  sessionIds: string[],
+  allTimestamps: Map<string, string>,
+): TrendDirection {
+  if (sessionIds.length < 3) return "steady";
+
+  const sorted = [...sessionIds].sort((a, b) => {
+    const ta = allTimestamps.get(a) ?? "";
+    const tb = allTimestamps.get(b) ?? "";
+    return ta.localeCompare(tb);
+  });
+
+  const thirdLen = Math.ceil(sorted.length / 3);
+  const oldThird = new Set(sorted.slice(0, thirdLen));
+  const recentThird = new Set(sorted.slice(sorted.length - thirdLen));
+
+  let oldCount = 0;
+  let recentCount = 0;
+  for (const id of sessionIds) {
+    if (oldThird.has(id)) oldCount++;
+    if (recentThird.has(id)) recentCount++;
+  }
+
+  if (recentCount > sessionIds.length * 0.5) return "up";
+  if (oldCount > sessionIds.length * 0.5) return "down";
+  return "steady";
+}
+
+// ---------------------------------------------------------------------------
+// Detectors
+// ---------------------------------------------------------------------------
+
+function buildTimestampMap(agg: ProjectAggregate): Map<string, string> {
+  const m = new Map<string, string>();
+  for (let i = 0; i < agg.session_ids.length; i++) {
+    m.set(agg.session_ids[i], agg.timestamps[i]);
+  }
+  return m;
+}
+
+export function detectRepeatedFileReads(agg: ProjectAggregate): DetectorFinding[] {
+  const threshold = agg.session_count < 10 ? 3 : 5;
+  const tsMap = buildTimestampMap(agg);
+  const findings: DetectorFinding[] = [];
+
+  for (const [filePath, sessions] of Object.entries(agg.file_read_sessions)) {
+    if (sessions.length < threshold) continue;
+    if (filePath.includes(".claude-mem") || filePath.includes(".claude/plugins")) continue;
+
+    findings.push({
+      pattern_type: "repeated-file-read",
+      evidence: `File read in ${sessions.length} sessions: ${filePath}`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: sessions.length * 200,
+      recommended_surface: "memory",
+      fingerprint: {
+        pattern_type: "repeated-file-read",
+        target_file: filePath,
+        primary_key: filePath,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectCommandErrors(agg: ProjectAggregate): DetectorFinding[] {
+  const tsMap = buildTimestampMap(agg);
+  const findings: DetectorFinding[] = [];
+
+  for (const [cmd, sessions] of Object.entries(agg.bash_error_sessions)) {
+    if (sessions.length < 2) continue;
+
+    findings.push({
+      pattern_type: "command-error",
+      evidence: `Command "${cmd}" errored in ${sessions.length} sessions`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: 0,
+      recommended_surface: "project-claude-md",
+      fingerprint: {
+        pattern_type: "command-error",
+        target_file: "",
+        primary_key: cmd,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectFilePairCoOccurrence(agg: ProjectAggregate): DetectorFinding[] {
+  const tsMap = buildTimestampMap(agg);
+  const pairSessions = new Map<string, string[]>();
+
+  for (const editSet of agg.edit_sets) {
+    const filtered = editSet.files.filter((f) => !f.includes("Documents/Obsidian"));
+    const sorted = [...filtered].sort();
+    for (let i = 0; i < sorted.length; i++) {
+      for (let j = i + 1; j < sorted.length; j++) {
+        const key = `${sorted[i]}|${sorted[j]}`;
+        if (!pairSessions.has(key)) pairSessions.set(key, []);
+        const sessions = pairSessions.get(key)!;
+        if (!sessions.includes(editSet.session_id)) {
+          sessions.push(editSet.session_id);
+        }
+      }
+    }
+  }
+
+  const findings: DetectorFinding[] = [];
+  for (const [pair, sessions] of pairSessions) {
+    if (sessions.length < 3) continue;
+
+    findings.push({
+      pattern_type: "file-pair-co-occurrence",
+      evidence: `Files edited together in ${sessions.length} sessions: ${pair.replace("|", " + ")}`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: 0,
+      recommended_surface: "skill-candidate",
+      fingerprint: {
+        pattern_type: "file-pair-co-occurrence",
+        target_file: pair.split("|")[0],
+        primary_key: pair,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectCrossProjectPaths(agg: ProjectAggregate): DetectorFinding[] {
+  const tsMap = buildTimestampMap(agg);
+  const findings: DetectorFinding[] = [];
+
+  for (const [path, sessions] of Object.entries(agg.out_of_project_sessions)) {
+    if (sessions.length < 2) continue;
+
+    findings.push({
+      pattern_type: "cross-project-path",
+      evidence: `Out-of-project path accessed in ${sessions.length} sessions: ${path}`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: 0,
+      recommended_surface: "memory",
+      fingerprint: {
+        pattern_type: "cross-project-path",
+        target_file: path,
+        primary_key: path,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectUserMessageFrequency(agg: ProjectAggregate): DetectorFinding[] {
+  const tsMap = buildTimestampMap(agg);
+  const textSessions = new Map<string, string[]>();
+
+  for (const msg of agg.user_message_corpus) {
+    if (!textSessions.has(msg.text)) textSessions.set(msg.text, []);
+    const sessions = textSessions.get(msg.text)!;
+    if (!sessions.includes(msg.session_id)) {
+      sessions.push(msg.session_id);
+    }
+  }
+
+  const findings: DetectorFinding[] = [];
+  for (const [text, sessions] of textSessions) {
+    if (sessions.length < 2) continue;
+
+    findings.push({
+      pattern_type: "user-message-frequency",
+      evidence: `Message repeated in ${sessions.length} sessions: "${text.slice(0, 80)}"`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: 0,
+      recommended_surface: "rules",
+      fingerprint: {
+        pattern_type: "user-message-frequency",
+        target_file: "",
+        primary_key: text,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectSkillCandidates(agg: ProjectAggregate): DetectorFinding[] {
+  const tsMap = buildTimestampMap(agg);
+  const sorted = [...agg.high_cost_sessions].sort(
+    (a, b) => b.total_input + b.total_output - (a.total_input + a.total_output),
+  );
+
+  const topCount = Math.max(1, Math.ceil(sorted.length * 0.25));
+  const top = sorted.slice(0, topCount);
+
+  const findings: DetectorFinding[] = [];
+  for (const session of top) {
+    if (session.tool_sequence.length < 5) continue;
+    const compressed = rleCompress(session.tool_sequence);
+
+    findings.push({
+      pattern_type: "skill-candidate",
+      evidence: `High-cost session (${session.total_input + session.total_output} tokens): ${compressed.slice(0, 120)}`,
+      session_ids: [session.session_id],
+      session_count: 1,
+      trend: computeTrend([session.session_id], tsMap),
+      estimated_tokens: session.total_input + session.total_output,
+      recommended_surface: "skill-candidate",
+      fingerprint: {
+        pattern_type: "skill-candidate",
+        target_file: "",
+        primary_key: session.session_id,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+// ---------------------------------------------------------------------------
+// Vault detection
+// ---------------------------------------------------------------------------
+
+export function resolveVaultPath(): string | null {
+  try {
+    const pluginDir = join(
+      process.env.HOME ?? "~",
+      ".claude",
+      "plugins",
+      "cache",
+      "nhangen",
+      "obsidian",
+    );
+    const entries = readdirSync(pluginDir);
+    const versionDirs = entries.filter((e) => /^\d+\.\d+\.\d+$/.test(e));
+
+    if (versionDirs.length === 0) return null;
+
+    versionDirs.sort((a, b) => {
+      const ap = a.split(".").map(Number);
+      const bp = b.split(".").map(Number);
+      for (let i = 0; i < 3; i++) {
+        if (ap[i] !== bp[i]) return ap[i] - bp[i];
+      }
+      return 0;
+    });
+
+    const latest = versionDirs[versionDirs.length - 1];
+    const localMd = readFileSync(join(pluginDir, latest, "obsidian.local.md"), "utf-8");
+    const match = localMd.match(/^vault_path:\s*(.+)$/m);
+    return match ? match[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Report output
+// ---------------------------------------------------------------------------
+
+export function resolveReportDir(): string {
+  const vault = resolveVaultPath();
+  let dir: string;
+  if (vault) {
+    dir = join(vault, "Projects", "Development", "md-scanner");
+  } else {
+    dir = join(process.env.HOME ?? "~", ".claude", "context-gaps", "reports");
+  }
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function tildefy(p: string): string {
+  const home = process.env.HOME ?? "";
+  if (home && p.startsWith(home)) return "~" + p.slice(home.length);
+  return p;
+}
+
+function findingsOfType(findings: DetectorFinding[], type: string): DetectorFinding[] {
+  return findings.filter((f) => f.pattern_type === type);
+}
+
+function formatFindingSection(title: string, items: DetectorFinding[]): string {
+  if (items.length === 0) return `### ${title}\n\n(none)\n`;
+  const lines = items.map(
+    (f) =>
+      `- **${tildefy(f.fingerprint.primary_key || f.evidence.slice(0, 60))}** ` +
+      `(${f.session_count} sessions, trend: ${f.trend})` +
+      (f.estimated_tokens ? ` ~${f.estimated_tokens} tokens` : ""),
+  );
+  return `### ${title}\n\n${lines.join("\n")}\n`;
+}
+
+export function writeReport(
+  canonical: string,
+  agg: ProjectAggregate,
+  findings: DetectorFinding[],
+  outputDir: string,
+): string {
+  const slug = projectSlug(canonical);
+  const filePath = join(outputDir, `${slug}.md`);
+
+  const sections = [
+    formatFindingSection(
+      "Repeated File Reads",
+      findingsOfType(findings, "repeated-file-read"),
+    ),
+    formatFindingSection(
+      "Command Errors",
+      findingsOfType(findings, "command-error"),
+    ),
+    formatFindingSection(
+      "File Pair Co-occurrence",
+      findingsOfType(findings, "file-pair-co-occurrence"),
+    ),
+    formatFindingSection(
+      "Cross-Project Paths",
+      findingsOfType(findings, "cross-project-path"),
+    ),
+    formatFindingSection(
+      "User Message Frequency",
+      findingsOfType(findings, "user-message-frequency"),
+    ),
+    formatFindingSection(
+      "Skill Candidates",
+      findingsOfType(findings, "skill-candidate"),
+    ),
+  ];
+
+  const content = `---
+generated: ${new Date().toISOString()}
+project: ${tildefy(canonical)}
+sessions_analyzed: ${agg.session_count}
+---
+
+# Context Gap Report: ${tildefy(canonical)}
+
+${sections.join("\n")}`;
+
+  writeFileSync(filePath, content);
+  return filePath;
+}
