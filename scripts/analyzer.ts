@@ -1,5 +1,6 @@
 import { spawnSync } from "child_process";
 import {
+  existsSync,
   readFileSync,
   writeFileSync,
   renameSync,
@@ -125,7 +126,7 @@ export function loadIndex(indexPath: string): AnalyzerIndex {
 }
 
 export function saveIndex(indexPath: string, index: AnalyzerIndex): void {
-  const tmp = indexPath + ".tmp";
+  const tmp = indexPath + `.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(index, null, 2));
   renameSync(tmp, indexPath);
 }
@@ -278,21 +279,25 @@ export function computeTrend(
 ): TrendDirection {
   if (sessionIds.length < 3) return "steady";
 
-  const sorted = [...sessionIds].sort((a, b) => {
-    const ta = allTimestamps.get(a) ?? "";
-    const tb = allTimestamps.get(b) ?? "";
-    return ta.localeCompare(tb);
-  });
+  const allTimes = [...allTimestamps.values()].sort();
+  if (allTimes.length < 3) return "steady";
 
-  const thirdLen = Math.ceil(sorted.length / 3);
-  const oldThird = new Set(sorted.slice(0, thirdLen));
-  const recentThird = new Set(sorted.slice(sorted.length - thirdLen));
+  const earliest = new Date(allTimes[0]).getTime();
+  const latest = new Date(allTimes[allTimes.length - 1]).getTime();
+  const range = latest - earliest;
+  if (range === 0) return "steady";
+
+  const oldBoundary = earliest + range / 3;
+  const recentBoundary = earliest + (2 * range) / 3;
 
   let oldCount = 0;
   let recentCount = 0;
   for (const id of sessionIds) {
-    if (oldThird.has(id)) oldCount++;
-    if (recentThird.has(id)) recentCount++;
+    const ts = allTimestamps.get(id);
+    if (!ts) continue;
+    const t = new Date(ts).getTime();
+    if (t <= oldBoundary) oldCount++;
+    if (t >= recentBoundary) recentCount++;
   }
 
   if (recentCount > sessionIds.length * 0.5) return "up";
@@ -391,7 +396,7 @@ export function detectFilePairCoOccurrence(agg: ProjectAggregate): DetectorFindi
 
     findings.push({
       pattern_type: "file-pair-co-occurrence",
-      evidence: `Files edited together in ${sessions.length} sessions: ${pair.replace("|", " + ")}`,
+      evidence: `Files edited together in ${sessions.length} sessions: ${pair.replaceAll("|", " + ")}`,
       session_ids: sessions,
       session_count: sessions.length,
       trend: computeTrend(sessions, tsMap),
@@ -502,6 +507,50 @@ export function detectSkillCandidates(agg: ProjectAggregate): DetectorFinding[] 
   return findings.sort((a, b) => b.session_count - a.session_count);
 }
 
+export function detectContextBloat(
+  canonicalPath: string,
+  bloatData: Array<{ sessionId: string; cwd: string; bloatRatio: number }>,
+): DetectorFinding[] {
+  const matching = bloatData.filter((d) => {
+    try {
+      return canonicalizePath(d.cwd) === canonicalPath;
+    } catch {
+      return d.cwd === canonicalPath;
+    }
+  });
+
+  const bloated = matching.filter((d) => d.bloatRatio > 2.0);
+  if (bloated.length < 3) return [];
+
+  const claudeMdPath = join(canonicalPath, "CLAUDE.md");
+  let claudeMdLines = 0;
+  if (existsSync(claudeMdPath)) {
+    try {
+      claudeMdLines = readFileSync(claudeMdPath, "utf-8").split("\n").length;
+    } catch {}
+  }
+
+  if (claudeMdLines >= 50) return [];
+
+  const avgRatio = bloated.reduce((sum, d) => sum + d.bloatRatio, 0) / bloated.length;
+  const sessionIds = bloated.map((d) => d.sessionId);
+
+  return [{
+    pattern_type: "context-bloat",
+    evidence: `${bloated.length} sessions with bloatRatio > 2.0 (avg ${avgRatio.toFixed(1)}), CLAUDE.md ${claudeMdLines === 0 ? "missing" : `${claudeMdLines} lines`}`,
+    session_ids: sessionIds,
+    session_count: bloated.length,
+    trend: "steady" as TrendDirection,
+    estimated_tokens: 0,
+    recommended_surface: "project-claude-md" as RecommendedSurface,
+    fingerprint: {
+      pattern_type: "context-bloat",
+      target_file: claudeMdPath,
+      primary_key: canonicalPath,
+    },
+  }];
+}
+
 // ---------------------------------------------------------------------------
 // Vault detection
 // ---------------------------------------------------------------------------
@@ -565,15 +614,84 @@ function findingsOfType(findings: DetectorFinding[], type: string): DetectorFind
   return findings.filter((f) => f.pattern_type === type);
 }
 
-function formatFindingSection(title: string, items: DetectorFinding[]): string {
-  if (items.length === 0) return `### ${title}\n\n(none)\n`;
-  const lines = items.map(
-    (f) =>
-      `- **${tildefy(f.fingerprint.primary_key || f.evidence.slice(0, 60))}** ` +
-      `(${f.session_count} sessions, trend: ${f.trend})` +
-      (f.estimated_tokens ? ` ~${f.estimated_tokens} tokens` : ""),
+function trendArrow(trend: TrendDirection): string {
+  if (trend === "up") return "^";
+  if (trend === "down") return "v";
+  return "->";
+}
+
+function formatRepeatedFileReads(items: DetectorFinding[]): string {
+  const title = "Repeated File Reads";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| File | Sessions | Est. Tokens | Trend |\n|------|----------|-------------|-------|";
+  const rows = items.map(
+    (f) => `| ${tildefy(f.fingerprint.primary_key)} | ${f.session_count} | ~${f.estimated_tokens.toLocaleString()} | ${trendArrow(f.trend)} |`,
   );
-  return `### ${title}\n\n${lines.join("\n")}\n`;
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatCommandErrors(items: DetectorFinding[]): string {
+  const title = "Command Errors";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Command | Sessions | Trend |\n|---------|----------|-------|";
+  const rows = items.map(
+    (f) => `| ${f.fingerprint.primary_key} | ${f.session_count} | ${trendArrow(f.trend)} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatFilePairCoOccurrence(items: DetectorFinding[]): string {
+  const title = "File Pair Co-occurrence";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Files | Sessions | Trend |\n|-------|----------|-------|";
+  const rows = items.map(
+    (f) => `| ${tildefy(f.fingerprint.primary_key.replaceAll("|", " + "))} | ${f.session_count} | ${trendArrow(f.trend)} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatCrossProjectPaths(items: DetectorFinding[]): string {
+  const title = "Cross-Project Paths";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Path | Sessions | From Project |\n|------|----------|--------------| ";
+  const rows = items.map(
+    (f) => `| ${tildefy(f.fingerprint.primary_key)} | ${f.session_count} | ${tildefy(f.fingerprint.target_file)} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatUserMessageFrequency(items: DetectorFinding[]): string {
+  const title = "User Message Frequency";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Message | Sessions |\n|---------|----------|";
+  const rows = items.map(
+    (f) => `| "${f.fingerprint.primary_key.slice(0, 80)}" | ${f.session_count} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatSkillCandidates(items: DetectorFinding[]): string {
+  const title = "Skill Candidates";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Tool Sequence (RLE) | Sessions | Est. Cost |\n|---------------------|----------|-----------|";
+  const rows = items.map(
+    (f) => `| ${f.evidence.replace(/^High-cost session \(\d+ tokens\): /, "").slice(0, 120)} | ${f.session_count} | ~${f.estimated_tokens.toLocaleString()} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatContextBloat(items: DetectorFinding[]): string {
+  const title = "Context Bloat (cron only)";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Sessions >2.0 bloat | Avg Ratio | CLAUDE.md Lines |\n|---------------------|-----------|-----------------|";
+  const rows = items.map((f) => {
+    const match = f.evidence.match(/^(\d+) sessions.*avg ([\d.]+)\).*?(\d+ lines|missing)$/);
+    const count = match ? match[1] : String(f.session_count);
+    const avg = match ? match[2] : "?";
+    const lines = match ? match[3] : "?";
+    return `| ${count} | ${avg} | ${lines} |`;
+  });
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
 }
 
 export function writeReport(
@@ -581,44 +699,30 @@ export function writeReport(
   agg: ProjectAggregate,
   findings: DetectorFinding[],
   outputDir: string,
+  pendingFileCount?: number,
 ): string {
   const slug = projectSlug(canonical);
   const filePath = join(outputDir, `${slug}.md`);
 
   const sections = [
-    formatFindingSection(
-      "Repeated File Reads",
-      findingsOfType(findings, "repeated-file-read"),
-    ),
-    formatFindingSection(
-      "Command Errors",
-      findingsOfType(findings, "command-error"),
-    ),
-    formatFindingSection(
-      "File Pair Co-occurrence",
-      findingsOfType(findings, "file-pair-co-occurrence"),
-    ),
-    formatFindingSection(
-      "Cross-Project Paths",
-      findingsOfType(findings, "cross-project-path"),
-    ),
-    formatFindingSection(
-      "User Message Frequency",
-      findingsOfType(findings, "user-message-frequency"),
-    ),
-    formatFindingSection(
-      "Skill Candidates",
-      findingsOfType(findings, "skill-candidate"),
-    ),
+    formatRepeatedFileReads(findingsOfType(findings, "repeated-file-read")),
+    formatCommandErrors(findingsOfType(findings, "command-error")),
+    formatFilePairCoOccurrence(findingsOfType(findings, "file-pair-co-occurrence")),
+    formatCrossProjectPaths(findingsOfType(findings, "cross-project-path")),
+    formatUserMessageFrequency(findingsOfType(findings, "user-message-frequency")),
+    formatSkillCandidates(findingsOfType(findings, "skill-candidate")),
+    formatContextBloat(findingsOfType(findings, "context-bloat")),
   ];
+
+  const pendingLine = pendingFileCount !== undefined ? `\npending_files: ${pendingFileCount}` : "";
 
   const content = `---
 generated: ${new Date().toISOString()}
 project: ${tildefy(canonical)}
-sessions_analyzed: ${agg.session_count}
+sessions_analyzed: ${agg.session_count}${pendingLine}
 ---
 
-# Context Gap Report: ${tildefy(canonical)}
+# Context Gaps -- ${basename(canonical)}
 
 ${sections.join("\n")}`;
 

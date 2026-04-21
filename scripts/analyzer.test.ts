@@ -355,4 +355,55 @@ describe("computeTrend", () => {
     ]);
     expect(computeTrend(sessions, tsMap)).toBe("steady");
   });
+
+  test("returns up when sessions concentrate in the recent third of the global timeline", () => {
+    const tsMap = new Map([
+      ["s1", "2026-01-01T00:00:00Z"],
+      ["s2", "2026-02-01T00:00:00Z"],
+      ["s3", "2026-03-01T00:00:00Z"],
+      ["s4", "2026-04-01T00:00:00Z"],
+      ["s5", "2026-05-01T00:00:00Z"],
+      ["s6", "2026-06-01T00:00:00Z"],
+      ["s7", "2026-05-15T00:00:00Z"],
+      ["s8", "2026-05-20T00:00:00Z"],
+      ["s9", "2026-06-15T00:00:00Z"],
+    ]);
+    const findingSessions = ["s6", "s7", "s8", "s9"];
+    expect(computeTrend(findingSessions, tsMap)).toBe("up");
+  });
+
+  test("returns down when sessions concentrate in the oldest third of the global timeline", () => {
+    const tsMap = new Map([
+      ["s1", "2026-01-01T00:00:00Z"],
+      ["s2", "2026-01-15T00:00:00Z"],
+      ["s3", "2026-02-01T00:00:00Z"],
+      ["s4", "2026-02-15T00:00:00Z"],
+      ["s5", "2026-03-01T00:00:00Z"],
+      ["s6", "2026-04-01T00:00:00Z"],
+      ["s7", "2026-05-01T00:00:00Z"],
+      ["s8", "2026-06-01T00:00:00Z"],
+    ]);
+    const findingSessions = ["s1", "s2", "s3", "s4"];
+    expect(computeTrend(findingSessions, tsMap)).toBe("down");
+  });
+});
+
+describe("detectSkillCandidates", () => {
+  test("selects top 25% by cost and RLE-compresses tool sequences", () => {
+    const agg = makeAgg({
+      session_count: 4,
+      session_ids: ["s1", "s2", "s3", "s4"],
+      timestamps: ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z", "2026-04-01T00:00:00Z"],
+      high_cost_sessions: [
+        { session_id: "s1", total_input: 100000, total_output: 50000, tool_sequence: ["Read", "Read", "Read", "Grep", "Edit", "Bash"] },
+        { session_id: "s2", total_input: 5000, total_output: 2000, tool_sequence: ["Read", "Edit"] },
+        { session_id: "s3", total_input: 3000, total_output: 1000, tool_sequence: ["Grep"] },
+        { session_id: "s4", total_input: 2000, total_output: 500, tool_sequence: ["Bash"] },
+      ],
+    });
+    const findings = detectSkillCandidates(agg);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].session_ids).toEqual(["s1"]);
+    expect(findings[0].evidence).toContain("Read*3");
+  });
 });

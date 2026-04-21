@@ -57,14 +57,24 @@ function buildPathPrefix(platform: "macos" | "linux" | "wsl"): string {
   return parts.join(":");
 }
 
+function shellEscape(value: string): string {
+  return value.replace(/'/g, "'\\''");
+}
+
 function buildWrapperScript(pathPrefix: string): string {
+  const escapedHome = shellEscape(HOME);
+  const escapedPluginCacheDir = shellEscape(PLUGIN_CACHE_DIR);
+  const escapedStateDir = shellEscape(STATE_DIR);
+  const escapedBunPath = shellEscape(join(HOME, ".bun", "bin", "bun"));
+  const escapedPathPrefix = shellEscape(pathPrefix);
+
   const lines: string[] = [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
     "",
-    `export PATH="${pathPrefix}:$PATH"`,
+    `export PATH='${escapedPathPrefix}:$PATH'`,
     "",
-    `PLUGIN_BASE="${PLUGIN_CACHE_DIR}"`,
+    `PLUGIN_BASE='${escapedPluginCacheDir}'`,
     "",
     "PLUGIN_DIR=$(ls -1d \"$PLUGIN_BASE\"/*/  2>/dev/null | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)",
     "",
@@ -77,14 +87,14 @@ function buildWrapperScript(pathPrefix: string): string {
     '  BUN="$BUN_PATH"',
     "elif command -v bun >/dev/null 2>&1; then",
     '  BUN="$(command -v bun)"',
-    `elif [ -x "${join(HOME, ".bun", "bin", "bun")}" ]; then`,
-    `  BUN="${join(HOME, ".bun", "bin", "bun")}"`,
+    `elif [ -x '${escapedBunPath}' ]; then`,
+    `  BUN='${escapedBunPath}'`,
     "else",
     '  echo "[md-scanner] error: bun not found" >&2',
     "  exit 1",
     "fi",
     "",
-    `LOG_PATH="${join(STATE_DIR, "analyzer.log")}"`,
+    `LOG_PATH='${shellEscape(join(STATE_DIR, "analyzer.log"))}'`,
     "",
     '"$BUN" "${PLUGIN_DIR}scripts/analyzer-cli.ts" --mode=cron >> "$LOG_PATH" 2>&1',
   ];
