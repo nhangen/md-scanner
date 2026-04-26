@@ -592,3 +592,261 @@ describe("detectAllowlistGaps", () => {
     expect(findings[1].fingerprint.primary_key).toBe("Bash(composer phpcs *)");
   });
 });
+
+import { detectClaudeMdUnusedSections, detectClaudeMdUndocumentedRepeat } from "./analyzer";
+import {
+  parseClaudeMdSections,
+  sectionHasCommandUsage,
+  sectionHasPathUsage,
+  normalizePath,
+  pathIsDocumented,
+} from "./claudemd";
+import { writeFileSync, mkdirSync, rmSync } from "fs";
+import { tmpdir } from "os";
+
+function makeTempProject(claudeMdContent: string, memoryContent: string | null = null): { projectPath: string; cleanup: () => void } {
+  const projectPath = `${tmpdir()}/md-scanner-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  mkdirSync(projectPath, { recursive: true });
+  writeFileSync(`${projectPath}/CLAUDE.md`, claudeMdContent);
+  let memoryDir: string | null = null;
+  if (memoryContent !== null) {
+    memoryDir = `${projectPath}/.memory`;
+    mkdirSync(memoryDir, { recursive: true });
+    writeFileSync(`${memoryDir}/MEMORY.md`, memoryContent);
+  }
+  return {
+    projectPath,
+    cleanup: () => rmSync(projectPath, { recursive: true, force: true }),
+  };
+}
+
+describe("parseClaudeMdSections", () => {
+  test("returns empty array for non-existent file", () => {
+    expect(parseClaudeMdSections("/does/not/exist.md")).toEqual([]);
+  });
+
+  test("extracts ## sections with title and body", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "# Header\n\n## Section A\n\nbody A\n\n## Section B\n\nbody B\n",
+    );
+    try {
+      const sections = parseClaudeMdSections(`${projectPath}/CLAUDE.md`);
+      expect(sections).toHaveLength(2);
+      expect(sections[0].title).toBe("Section A");
+      expect(sections[1].title).toBe("Section B");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("extracts backtick-quoted commands", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Commands\n\nUse `gh pr view` and `composer phpcs` to check.\n",
+    );
+    try {
+      const sections = parseClaudeMdSections(`${projectPath}/CLAUDE.md`);
+      expect(sections[0].commands).toContain("gh pr view");
+      expect(sections[0].commands).toContain("composer phpcs");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("extracts paths and rule refs", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Rules\n\nSee `~/.claude/rules/safety-invariant-scope.md` and `safety-invariant-scope`.\n",
+    );
+    try {
+      const sections = parseClaudeMdSections(`${projectPath}/CLAUDE.md`);
+      expect(sections[0].paths.length).toBeGreaterThan(0);
+      expect(sections[0].rule_refs).toContain("safety-invariant-scope");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("normalizePath", () => {
+  test("collapses ~/ prefix", () => {
+    expect(normalizePath("~/.claude/rules", "/Users/me")).toBe(".claude/rules");
+  });
+
+  test("collapses absolute home prefix", () => {
+    expect(normalizePath("/Users/me/.claude/rules", "/Users/me")).toBe(".claude/rules");
+  });
+
+  test("leaves non-home paths unchanged", () => {
+    expect(normalizePath("/etc/hosts", "/Users/me")).toBe("/etc/hosts");
+  });
+});
+
+describe("sectionHasCommandUsage", () => {
+  test("matches when section command appears in observed keys", () => {
+    const section = { title: "X", body: "", commands: ["gh pr view"], paths: [], rule_refs: [] };
+    expect(sectionHasCommandUsage(section, new Set(["gh pr"]))).toBe(true);
+  });
+
+  test("matches single-token section command against pair head", () => {
+    const section = { title: "X", body: "", commands: ["composer"], paths: [], rule_refs: [] };
+    expect(sectionHasCommandUsage(section, new Set(["composer phpcs"]))).toBe(true);
+  });
+
+  test("returns false when no commands match", () => {
+    const section = { title: "X", body: "", commands: ["gh pr view"], paths: [], rule_refs: [] };
+    expect(sectionHasCommandUsage(section, new Set(["git status"]))).toBe(false);
+  });
+
+  test("returns true when section has no commands (insufficient evidence to claim unused)", () => {
+    const section = { title: "X", body: "prose only", commands: [], paths: [], rule_refs: [] };
+    expect(sectionHasCommandUsage(section, new Set())).toBe(true);
+  });
+});
+
+describe("pathIsDocumented", () => {
+  test("returns true when path appears in CLAUDE.md", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Files\n\nSee `~/.config/branch-cleanup/repos.md` for paths.\n",
+    );
+    try {
+      expect(pathIsDocumented("/Users/me/.config/branch-cleanup/repos.md", projectPath, null)).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("returns true when path appears in MEMORY.md", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Other\n\nNothing relevant\n",
+      "Remember: ~/.config/branch-cleanup/repos.md is the truth.",
+    );
+    try {
+      expect(pathIsDocumented("/Users/me/.config/branch-cleanup/repos.md", projectPath, `${projectPath}/.memory`)).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("returns false when path is not mentioned anywhere", () => {
+    const { projectPath, cleanup } = makeTempProject("## Other\n\nNothing relevant\n");
+    try {
+      expect(pathIsDocumented("/Users/me/.config/branch-cleanup/repos.md", projectPath, null)).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("returns false when CLAUDE.md does not exist", () => {
+    expect(pathIsDocumented("/some/path", "/does/not/exist", null)).toBe(false);
+  });
+});
+
+describe("detectClaudeMdUnusedSections", () => {
+  test("flags sections whose commands never appear in transcripts (>=10 sessions)", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Stale Workflow\n\nRun `frobnicate widget` to deploy.\n\n## Active Workflow\n\nRun `composer phpcs` for lint.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 12,
+        session_ids: Array.from({ length: 12 }, (_, i) => `s${i}`),
+        bash_command_pair_sessions: { "composer phpcs": ["s1", "s2", "s3"] },
+      });
+      const findings = detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].fingerprint.primary_key).toBe("Stale Workflow");
+      expect(findings[0].pattern_type).toBe("claudemd-unused-section");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("does not flag when session count is below threshold", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Stale Workflow\n\nRun `frobnicate widget` to deploy.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 5,
+        session_ids: ["s1", "s2", "s3", "s4", "s5"],
+        bash_command_pair_sessions: {},
+      });
+      expect(detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`)).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("skips prose-only sections that lack commands and paths", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Philosophy\n\nWe value simplicity over cleverness.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 20,
+        session_ids: Array.from({ length: 20 }, (_, i) => `s${i}`),
+      });
+      expect(detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`)).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("returns empty when CLAUDE.md does not exist", () => {
+    const agg = makeAgg({ session_count: 20 });
+    expect(detectClaudeMdUnusedSections(agg, "/no/such/file.md")).toEqual([]);
+  });
+});
+
+describe("detectClaudeMdUndocumentedRepeat", () => {
+  test("flags re-read paths that ARE documented", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Repos\n\nSee `~/.config/branch-cleanup/repos.md` for the canonical list.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 12,
+        file_read_sessions: {
+          "/Users/me/.config/branch-cleanup/repos.md": ["s1", "s2", "s3", "s4", "s5", "s6"],
+        },
+      });
+      const findings = detectClaudeMdUndocumentedRepeat(agg, projectPath, null);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].pattern_type).toBe("claudemd-undocumented-repeat");
+      expect(findings[0].evidence).toContain("Doc exists but isn't being followed");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("does NOT flag re-read paths that are absent from CLAUDE.md (existing repeated-file-read covers those)", () => {
+    const { projectPath, cleanup } = makeTempProject("## Other\n\nUnrelated.\n");
+    try {
+      const agg = makeAgg({
+        session_count: 12,
+        file_read_sessions: {
+          "/Users/me/.config/branch-cleanup/repos.md": ["s1", "s2", "s3", "s4", "s5", "s6"],
+        },
+      });
+      expect(detectClaudeMdUndocumentedRepeat(agg, projectPath, null)).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("respects the same .claude-mem / plugins exclusions as detectRepeatedFileReads", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Plugin Configs\n\n`/Users/me/.claude/plugins/cache/foo/config.json` is documented.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 12,
+        file_read_sessions: {
+          "/Users/me/.claude/plugins/cache/foo/config.json": ["s1", "s2", "s3", "s4", "s5"],
+        },
+      });
+      expect(detectClaudeMdUndocumentedRepeat(agg, projectPath, null)).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+});

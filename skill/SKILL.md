@@ -101,6 +101,8 @@ For each detected pattern, determine the target:
 - Pattern is a behavioral constraint ("never X", "always Y") → **`~/.claude/rules/<name>.md`** (follow creating-rules process: YAML frontmatter with `description` and `globs`, matching section in `~/.claude/CLAUDE.md`)
 - Pattern is environment/tool context → **memory file** in the project's memory directory
 - Pattern is a read-only command/MCP tool that prompts repeatedly (`allowlist-gap`) → **project `.claude/settings.local.json`** under `permissions.allow[]`. If the file doesn't exist, create it (gitignored convention). Don't write to the committed `.claude/settings.json` unless the project explicitly uses that path for personal allowlists.
+- Pattern is a CLAUDE.md section whose commands/paths never appear in transcripts (`claudemd-unused-section`) → **project CLAUDE.md** — propose archival or rewrite. The section may have been written speculatively; behavioral data shows it's never exercised. User may reject if the section documents a future workflow not yet adopted.
+- Pattern is a re-read file that IS documented but still gets re-read (`claudemd-undocumented-repeat`) → **memory file** — the doc exists but the routing/content isn't surfacing in-context. Cache the relevant values directly (e.g., resolved paths, taxonomies) rather than the file path/reference. Different fix from `repeated-file-read` (which assumes no doc exists).
 - Pattern is a repeated workflow → **flag as skill candidate** (no auto-creation, just recommend)
 
 ### Rank

@@ -25,6 +25,12 @@ import {
   isAutoAllowed,
   isArbitraryCode,
 } from "./allowlist";
+import {
+  parseClaudeMdSections,
+  sectionHasCommandUsage,
+  sectionHasPathUsage,
+  pathIsDocumented,
+} from "./claudemd";
 
 // ---------------------------------------------------------------------------
 // Filtering
@@ -416,6 +422,84 @@ export function detectAllowlistGaps(
         pattern_type: "allowlist-gap",
         target_file: ".claude/settings.local.json",
         primary_key: pattern,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectClaudeMdUnusedSections(
+  agg: ProjectAggregate,
+  claudeMdPath: string,
+): DetectorFinding[] {
+  const findings: DetectorFinding[] = [];
+  const sections = parseClaudeMdSections(claudeMdPath);
+  if (sections.length === 0) return findings;
+
+  const minSessions = 10;
+  if (agg.session_count < minSessions) return findings;
+
+  const bashCommandKeys = new Set(Object.keys(agg.bash_command_pair_sessions));
+  const observedPaths = new Set<string>([
+    ...Object.keys(agg.file_read_sessions),
+    ...agg.edit_sets.flatMap((e) => e.files),
+  ]);
+
+  const tsMap = buildTimestampMap(agg);
+
+  for (const section of sections) {
+    if (section.commands.length === 0 && section.paths.length === 0) continue;
+
+    const cmdUsed = sectionHasCommandUsage(section, bashCommandKeys);
+    const pathUsed = sectionHasPathUsage(section, observedPaths);
+    if (cmdUsed || pathUsed) continue;
+
+    findings.push({
+      pattern_type: "claudemd-unused-section",
+      evidence: `CLAUDE.md section "${section.title}" references commands/paths never observed across ${agg.session_count} sessions in this project. Candidate for archival.`,
+      session_ids: agg.session_ids,
+      session_count: agg.session_count,
+      trend: computeTrend(agg.session_ids, tsMap),
+      estimated_tokens: 0,
+      recommended_surface: "project-claude-md",
+      fingerprint: {
+        pattern_type: "claudemd-unused-section",
+        target_file: claudeMdPath,
+        primary_key: section.title,
+      },
+    });
+  }
+
+  return findings;
+}
+
+export function detectClaudeMdUndocumentedRepeat(
+  agg: ProjectAggregate,
+  projectPath: string,
+  memoryDir: string | null,
+): DetectorFinding[] {
+  const findings: DetectorFinding[] = [];
+  const threshold = agg.session_count < 10 ? 3 : 5;
+  const tsMap = buildTimestampMap(agg);
+
+  for (const [filePath, sessions] of Object.entries(agg.file_read_sessions)) {
+    if (sessions.length < threshold) continue;
+    if (filePath.includes(".claude-mem") || filePath.includes(".claude/plugins")) continue;
+    if (!pathIsDocumented(filePath, projectPath, memoryDir)) continue;
+
+    findings.push({
+      pattern_type: "claudemd-undocumented-repeat",
+      evidence: `File ${filePath} read in ${sessions.length} sessions despite being mentioned in CLAUDE.md or memory. Doc exists but isn't being followed — either the reference doesn't surface in-context, or the cached value is stale.`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: sessions.length * 200,
+      recommended_surface: "memory",
+      fingerprint: {
+        pattern_type: "claudemd-undocumented-repeat",
+        target_file: filePath,
+        primary_key: filePath,
       },
     });
   }

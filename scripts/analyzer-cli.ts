@@ -18,6 +18,8 @@ import {
   detectSkillCandidates,
   detectContextBloat,
   detectAllowlistGaps,
+  detectClaudeMdUnusedSections,
+  detectClaudeMdUndocumentedRepeat,
 } from "./analyzer";
 import { loadExistingAllowlist } from "./allowlist";
 import type { DetectorFinding, ProjectAggregate } from "./types";
@@ -165,11 +167,21 @@ async function main(): Promise<void> {
     if (agg.session_count < 2) continue;
 
     const existingAllowlist = loadExistingAllowlist(canonical);
+    const claudeMdPath = join(canonical, "CLAUDE.md");
+    const memoryDir = join(
+      process.env.HOME ?? "~",
+      ".claude",
+      "projects",
+      canonical.replace(/\//g, "-").replace(/^-/, "-"),
+      "memory",
+    );
 
     const rawFindings: DetectorFinding[] = [
       ...detectRepeatedFileReads(agg),
       ...detectCommandErrors(agg),
       ...detectAllowlistGaps(agg, existingAllowlist),
+      ...detectClaudeMdUnusedSections(agg, claudeMdPath),
+      ...detectClaudeMdUndocumentedRepeat(agg, canonical, memoryDir),
       ...detectFilePairCoOccurrence(agg),
       ...detectCrossProjectPaths(agg),
       ...detectUserMessageFrequency(agg),
