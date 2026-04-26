@@ -8,9 +8,10 @@
 // directory; running it on every Stop hook would be wasteful. The CLI gates
 // this detector behind --mode=cron.
 
-import { existsSync, readFileSync, readdirSync } from "fs";
+import { existsSync, readdirSync } from "fs";
 import { join } from "path";
 import type { DetectorFinding } from "./types";
+import { safeReadFile } from "./safe-read";
 
 const CURSOR_RULES_DIR = join(process.env.HOME ?? "~", ".cursor", "rules");
 const CLAUDE_RULES_DIR = join(process.env.HOME ?? "~", ".claude", "rules");
@@ -51,7 +52,7 @@ export function normalizeQuotes(text: string): string {
 
 export interface RuleDriftEntry {
   rule_name: string;
-  status: "cursor-only" | "claude-only" | "differs";
+  status: "cursor-only" | "claude-only" | "differs" | "unreadable";
   cursor_path: string;
   claude_path: string;
 }
@@ -87,14 +88,24 @@ export function detectRuleDriftEntries(
       continue;
     }
 
-    let cursorBody: string;
-    let claudeBody: string;
-    try {
-      cursorBody = normalizeQuotes(stripFrontmatter(readFileSync(cursorPath, "utf-8")));
-      claudeBody = normalizeQuotes(stripFrontmatter(readFileSync(claudePath, "utf-8")));
-    } catch {
-      continue; // skip unreadable
+    const cursorRead = safeReadFile(cursorPath);
+    const claudeRead = safeReadFile(claudePath);
+    if (!cursorRead.ok || !claudeRead.ok) {
+      // At least one side exists (the listing said so) but read failed.
+      // Surface as a finding so the user sees it; safeReadFile counts the
+      // degradation. Without this, drift between two unreadable files would
+      // be invisible to the analyzer.
+      entries.push({
+        rule_name: name,
+        status: "unreadable",
+        cursor_path: cursorPath,
+        claude_path: claudePath,
+      });
+      continue;
     }
+
+    const cursorBody = normalizeQuotes(stripFrontmatter(cursorRead.content));
+    const claudeBody = normalizeQuotes(stripFrontmatter(claudeRead.content));
 
     if (cursorBody !== claudeBody) {
       entries.push({ rule_name: name, status: "differs", cursor_path: cursorPath, claude_path: claudePath });
@@ -129,6 +140,8 @@ export function detectRuleDrift(): DetectorFinding[] {
       evidence = `Rule "${entry.rule_name}" exists in ~/.cursor/rules/ but not ~/.claude/rules/. Copy it across (drop alwaysApply, add globs).`;
     } else if (entry.status === "claude-only") {
       evidence = `Rule "${entry.rule_name}" exists in ~/.claude/rules/ but not ~/.cursor/rules/. Copy it across (preserve globs, add alwaysApply if needed).`;
+    } else if (entry.status === "unreadable") {
+      evidence = `Rule "${entry.rule_name}" exists in both directories but at least one side is unreadable. Investigate file permissions; until resolved, drift detection is degraded for this rule.`;
     } else {
       evidence = `Rule "${entry.rule_name}" body differs between Cursor and Claude versions.`;
     }

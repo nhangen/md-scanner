@@ -12,7 +12,7 @@
 //
 // Mirrored here so the analyzer can run without parsing the Claude Code source.
 
-import { existsSync, readFileSync } from "fs";
+import { safeReadFile, safeParseJson } from "./safe-read";
 
 // Always auto-allowed (any args).
 const AUTO_ALLOW_ANY_ARGS = new Set([
@@ -220,17 +220,15 @@ export function loadExistingAllowlist(projectPath: string): Set<string> {
     `${projectPath}/.claude/settings.local.json`,
   ];
   for (const path of candidates) {
-    if (!existsSync(path)) continue;
-    try {
-      const data = JSON.parse(readFileSync(path, "utf-8"));
-      const allow = data?.permissions?.allow;
-      if (Array.isArray(allow)) {
-        for (const entry of allow) {
-          if (typeof entry === "string") result.add(entry);
-        }
+    const read = safeReadFile(path);
+    if (!read.ok) continue; // missing is normal; unreadable / parse-error are counted in degraded stats
+    const parsed = safeParseJson<{ permissions?: { allow?: unknown[] } }>(read.content, path);
+    if (!parsed.ok) continue;
+    const allow = parsed.value?.permissions?.allow;
+    if (Array.isArray(allow)) {
+      for (const entry of allow) {
+        if (typeof entry === "string") result.add(entry);
       }
-    } catch {
-      // malformed JSON — skip
     }
   }
   return result;

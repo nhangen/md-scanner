@@ -1081,4 +1081,24 @@ describe("detectRuleDriftEntries", () => {
   test("returns empty when both directories are missing", () => {
     expect(detectRuleDriftEntries("/no/cursor", "/no/claude")).toEqual([]);
   });
+
+  test('emits status="unreadable" when both files exist but at least one cannot be read', () => {
+    const dir = `${tmpdir()}/md-scanner-drift-unreadable-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cursorDir = `${dir}/cursor`;
+    const claudeDir = `${dir}/claude`;
+    mkdirSync(cursorDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    // Plant a real file on the cursor side, but on the claude side use a
+    // directory in place of the file so readFileSync hits EISDIR.
+    writeFileSync(`${cursorDir}/poisoned.mdc`, "---\n---\n\n# Poisoned\n");
+    mkdirSync(`${claudeDir}/poisoned.md`); // <-- directory, not file
+    try {
+      const entries = detectRuleDriftEntries(cursorDir, claudeDir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].status).toBe("unreadable");
+      expect(entries[0].rule_name).toBe("poisoned");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

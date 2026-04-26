@@ -32,6 +32,7 @@ import {
   sectionHasPathUsage,
   pathIsDocumented,
 } from "./claudemd";
+import { safeReadFile, safeParseJson } from "./safe-read";
 
 // ---------------------------------------------------------------------------
 // Filtering
@@ -141,16 +142,24 @@ export function rleCompress(sequence: string[]): string {
 // ---------------------------------------------------------------------------
 
 export function loadIndex(indexPath: string): AnalyzerIndex {
-  try {
-    const raw = readFileSync(indexPath, "utf-8");
-    return JSON.parse(raw) as AnalyzerIndex;
-  } catch {
-    return {
-      schema_version: ANALYZER_SCHEMA_VERSION,
-      last_run: "",
-      processed_files: {},
-    };
+  const fresh = (): AnalyzerIndex => ({
+    schema_version: ANALYZER_SCHEMA_VERSION,
+    last_run: "",
+    processed_files: {},
+  });
+
+  const read = safeReadFile(indexPath);
+  if (!read.ok) {
+    // Missing on first run is normal; unreadable is counted in degraded stats.
+    return fresh();
   }
+  const parsed = safeParseJson<AnalyzerIndex>(read.content, indexPath);
+  if (!parsed.ok) {
+    // Corrupted index → re-process every pending file. The degradation counter
+    // surfaces this so the user knows why a run took unexpectedly long.
+    return fresh();
+  }
+  return parsed.value;
 }
 
 export function saveIndex(indexPath: string, index: AnalyzerIndex): void {
@@ -676,21 +685,35 @@ export function detectContextBloat(
   if (bloated.length < 3) return [];
 
   const claudeMdPath = join(canonicalPath, "CLAUDE.md");
+  const claudeMdRead = safeReadFile(claudeMdPath);
   let claudeMdLines = 0;
-  if (existsSync(claudeMdPath)) {
-    try {
-      claudeMdLines = readFileSync(claudeMdPath, "utf-8").split("\n").length;
-    } catch {}
+  let claudeMdState: "missing" | "unreadable" | "present" = "missing";
+  if (claudeMdRead.ok) {
+    claudeMdLines = claudeMdRead.content.split("\n").length;
+    claudeMdState = "present";
+  } else if (claudeMdRead.reason === "unreadable") {
+    claudeMdState = "unreadable";
   }
 
-  if (claudeMdLines >= 50) return [];
+  // Don't return early on unreadable: a high-bloat project with an unreadable
+  // CLAUDE.md is exactly the kind of degraded state the finding should surface.
+  if (claudeMdState === "present" && claudeMdLines >= 50) return [];
 
   const avgRatio = bloated.reduce((sum, d) => sum + d.bloatRatio, 0) / bloated.length;
   const sessionIds = bloated.map((d) => d.sessionId);
 
+  let mdEvidence: string;
+  if (claudeMdState === "missing") {
+    mdEvidence = "CLAUDE.md missing";
+  } else if (claudeMdState === "unreadable") {
+    mdEvidence = "CLAUDE.md unreadable";
+  } else {
+    mdEvidence = `CLAUDE.md ${claudeMdLines} lines`;
+  }
+
   return [{
     pattern_type: "context-bloat",
-    evidence: `${bloated.length} sessions with bloatRatio > 2.0 (avg ${avgRatio.toFixed(1)}), CLAUDE.md ${claudeMdLines === 0 ? "missing" : `${claudeMdLines} lines`}`,
+    evidence: `${bloated.length} sessions with bloatRatio > 2.0 (avg ${avgRatio.toFixed(1)}), ${mdEvidence}`,
     session_ids: sessionIds,
     session_count: bloated.length,
     trend: "steady" as TrendDirection,

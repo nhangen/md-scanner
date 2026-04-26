@@ -24,6 +24,7 @@ import {
 } from "./analyzer";
 import { loadExistingAllowlist } from "./allowlist";
 import { detectRuleDrift } from "./rule-drift";
+import { getDegradedReadStats, resetDegradedReadStats } from "./safe-read";
 import type { DetectorFinding, ProjectAggregate } from "./types";
 
 const STATE_DIR = join(process.env.HOME ?? "~", ".claude", "context-gaps");
@@ -204,6 +205,18 @@ async function main(): Promise<void> {
   saveIndex(INDEX_PATH, updatedIndex);
 
   log(`done: ${reportsWritten} reports, ${totalFindings} total findings, mode=${mode}`);
+
+  const degraded = getDegradedReadStats();
+  if (degraded.count > 0) {
+    log(`DEGRADED: ${degraded.count} reads failed during this run (analyzer output is partial)`);
+    for (const sample of degraded.samples) {
+      log(`  ${sample.reason}: ${sample.path}${sample.error ? ` (${sample.error})` : ""}`);
+    }
+    process.stderr.write(
+      `md-scanner: ${degraded.count} read failure(s) during run; see ${LOG_PATH} for details\n`,
+    );
+  }
+  resetDegradedReadStats();
 }
 
 main().catch((err) => {

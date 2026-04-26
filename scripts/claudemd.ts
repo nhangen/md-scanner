@@ -14,8 +14,9 @@
 // Both are best-effort against arbitrary CLAUDE.md structure. Parse failures
 // log and return empty rather than crashing the analyzer.
 
-import { existsSync, readFileSync } from "fs";
+import { existsSync } from "fs";
 import { join } from "path";
+import { safeReadFile } from "./safe-read";
 
 export interface ClaudeMdSection {
   title: string;
@@ -37,17 +38,11 @@ const PATH_PATTERN = /`((?:\/|~\/)[A-Za-z0-9_./~-]+)`/g;
  * detectors never crash the run.
  */
 export function parseClaudeMdSections(filePath: string): ClaudeMdSection[] {
-  if (!existsSync(filePath)) return [];
-
-  let content: string;
-  try {
-    content = readFileSync(filePath, "utf-8");
-  } catch {
-    return [];
-  }
+  const result = safeReadFile(filePath);
+  if (!result.ok) return [];
 
   const sections: ClaudeMdSection[] = [];
-  const lines = content.split("\n");
+  const lines = result.content.split("\n");
 
   let currentTitle: string | null = null;
   let currentBody: string[] = [];
@@ -183,12 +178,9 @@ export function pathIsDocumented(
   const basename = filePath.split("/").pop() ?? filePath;
 
   for (const path of candidates) {
-    let content: string;
-    try {
-      content = readFileSync(path, "utf-8");
-    } catch {
-      continue;
-    }
+    const result = safeReadFile(path);
+    if (!result.ok) continue; // unreadable doc — counted in degraded stats; other candidates may still match
+    const content = result.content;
     if (content.includes(normalizedTarget)) return true;
     if (content.includes(filePath)) return true;
     if (basename.length > 4 && content.includes(basename)) return true;
