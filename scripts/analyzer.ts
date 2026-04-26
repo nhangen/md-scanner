@@ -816,6 +816,46 @@ function formatSkillCandidates(items: DetectorFinding[]): string {
   return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
 }
 
+function formatAllowlistGaps(items: DetectorFinding[]): string {
+  const title = "Allowlist Gaps";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Suggested Pattern | Sessions | Trend |\n|-------------------|----------|-------|";
+  const rows = items.map(
+    (f) => `| \`${f.fingerprint.primary_key}\` | ${f.session_count} | ${trendArrow(f.trend)} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatClaudeMdUnusedSections(items: DetectorFinding[]): string {
+  const title = "CLAUDE.md Unused Sections";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Section | Sessions Analyzed |\n|---------|-------------------|";
+  const rows = items.map(
+    (f) => `| "${f.fingerprint.primary_key}" | ${f.session_count} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatClaudeMdUndocumentedRepeat(items: DetectorFinding[]): string {
+  const title = "CLAUDE.md: Doc Exists But Isn't Followed";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| File | Re-read Sessions | Est. Tokens | Trend |\n|------|------------------|-------------|-------|";
+  const rows = items.map(
+    (f) => `| ${tildefy(f.fingerprint.primary_key)} | ${f.session_count} | ~${f.estimated_tokens.toLocaleString()} | ${trendArrow(f.trend)} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatRuleDrift(items: DetectorFinding[]): string {
+  const title = "Rule Drift (cron only)";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Rule | Status |\n|------|--------|";
+  const rows = items.map(
+    (f) => `| ${f.fingerprint.primary_key} | ${f.evidence.split(".")[0]} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
 function formatContextBloat(items: DetectorFinding[]): string {
   const title = "Context Bloat (cron only)";
   if (items.length === 0) return `## ${title}\n\n(none)\n`;
@@ -843,11 +883,15 @@ export function writeReport(
   const sections = [
     formatRepeatedFileReads(findingsOfType(findings, "repeated-file-read")),
     formatCommandErrors(findingsOfType(findings, "command-error")),
+    formatAllowlistGaps(findingsOfType(findings, "allowlist-gap")),
+    formatClaudeMdUnusedSections(findingsOfType(findings, "claudemd-unused-section")),
+    formatClaudeMdUndocumentedRepeat(findingsOfType(findings, "claudemd-undocumented-repeat")),
     formatFilePairCoOccurrence(findingsOfType(findings, "file-pair-co-occurrence")),
     formatCrossProjectPaths(findingsOfType(findings, "cross-project-path")),
     formatUserMessageFrequency(findingsOfType(findings, "user-message-frequency")),
     formatSkillCandidates(findingsOfType(findings, "skill-candidate")),
     formatContextBloat(findingsOfType(findings, "context-bloat")),
+    formatRuleDrift(findingsOfType(findings, "rule-drift")),
   ];
 
   const pendingLine = pendingFileCount !== undefined ? `\npending_files: ${pendingFileCount}` : "";

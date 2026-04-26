@@ -850,3 +850,119 @@ describe("detectClaudeMdUndocumentedRepeat", () => {
     }
   });
 });
+
+import { detectRuleDriftEntries, stripFrontmatter, normalizeQuotes } from "./rule-drift";
+
+describe("stripFrontmatter", () => {
+  test("removes leading --- block", () => {
+    const input = "---\ndescription: foo\nglobs:\n---\n\n# Body\n\ntext\n";
+    expect(stripFrontmatter(input)).toBe("\n# Body\n\ntext\n");
+  });
+
+  test("returns content unchanged when no frontmatter", () => {
+    const input = "# Body\n\ntext\n";
+    expect(stripFrontmatter(input)).toBe(input);
+  });
+
+  test("returns content unchanged when frontmatter is unclosed", () => {
+    const input = "---\ndescription: foo\n# Body\n";
+    expect(stripFrontmatter(input)).toBe(input);
+  });
+});
+
+describe("normalizeQuotes", () => {
+  test("converts smart quotes to straight quotes", () => {
+    expect(normalizeQuotes("don’t")).toBe("don't");
+    expect(normalizeQuotes("“hello”")).toBe('"hello"');
+  });
+
+  test("converts em-dash to double-dash", () => {
+    expect(normalizeQuotes("a — b")).toBe("a -- b");
+  });
+});
+
+describe("detectRuleDriftEntries", () => {
+  test("flags rules in cursor only", () => {
+    const dir = `${tmpdir()}/md-scanner-drift-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cursorDir = `${dir}/cursor`;
+    const claudeDir = `${dir}/claude`;
+    mkdirSync(cursorDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(`${cursorDir}/orphan.mdc`, "---\nalwaysApply: true\n---\n\n# Orphan\n");
+    try {
+      const entries = detectRuleDriftEntries(cursorDir, claudeDir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].rule_name).toBe("orphan");
+      expect(entries[0].status).toBe("cursor-only");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("flags rules in claude only", () => {
+    const dir = `${tmpdir()}/md-scanner-drift-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cursorDir = `${dir}/cursor`;
+    const claudeDir = `${dir}/claude`;
+    mkdirSync(cursorDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(`${claudeDir}/orphan.md`, "---\nglobs:\n---\n\n# Orphan\n");
+    try {
+      const entries = detectRuleDriftEntries(cursorDir, claudeDir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].status).toBe("claude-only");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("flags rules whose body differs (ignoring frontmatter)", () => {
+    const dir = `${tmpdir()}/md-scanner-drift-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cursorDir = `${dir}/cursor`;
+    const claudeDir = `${dir}/claude`;
+    mkdirSync(cursorDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(`${cursorDir}/foo.mdc`, "---\nalwaysApply: true\n---\n\n# Foo\n\nVersion 1\n");
+    writeFileSync(`${claudeDir}/foo.md`, "---\nglobs:\n---\n\n# Foo\n\nVersion 2\n");
+    try {
+      const entries = detectRuleDriftEntries(cursorDir, claudeDir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].status).toBe("differs");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("returns empty when bodies match (ignoring different frontmatter)", () => {
+    const dir = `${tmpdir()}/md-scanner-drift-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cursorDir = `${dir}/cursor`;
+    const claudeDir = `${dir}/claude`;
+    mkdirSync(cursorDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(`${cursorDir}/foo.mdc`, "---\nalwaysApply: true\n---\n\n# Foo\n\nSame body\n");
+    writeFileSync(`${claudeDir}/foo.md`, "---\nglobs:\n---\n\n# Foo\n\nSame body\n");
+    try {
+      expect(detectRuleDriftEntries(cursorDir, claudeDir)).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("normalizes smart quotes when comparing", () => {
+    const dir = `${tmpdir()}/md-scanner-drift-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cursorDir = `${dir}/cursor`;
+    const claudeDir = `${dir}/claude`;
+    mkdirSync(cursorDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(`${cursorDir}/foo.mdc`, "---\n---\n\nNever ask the user’s repo location\n");
+    writeFileSync(`${claudeDir}/foo.md`, "---\n---\n\nNever ask the user's repo location\n");
+    try {
+      expect(detectRuleDriftEntries(cursorDir, claudeDir)).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("returns empty when both directories are missing", () => {
+    expect(detectRuleDriftEntries("/no/cursor", "/no/claude")).toEqual([]);
+  });
+});

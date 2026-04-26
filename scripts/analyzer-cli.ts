@@ -22,6 +22,7 @@ import {
   detectClaudeMdUndocumentedRepeat,
 } from "./analyzer";
 import { loadExistingAllowlist } from "./allowlist";
+import { detectRuleDrift } from "./rule-drift";
 import type { DetectorFinding, ProjectAggregate } from "./types";
 
 const STATE_DIR = join(process.env.HOME ?? "~", ".claude", "context-gaps");
@@ -187,6 +188,7 @@ async function main(): Promise<void> {
       ...detectUserMessageFrequency(agg),
       ...detectSkillCandidates(agg),
       ...detectContextBloat(canonical, bloatData),
+      ...(mode === "cron" ? detectRuleDrift() : []),
     ];
 
     const findings = applyTrendToFindings(rawFindings, tsMap);
