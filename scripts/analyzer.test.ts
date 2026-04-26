@@ -184,6 +184,7 @@ function makeAgg(overrides: Partial<ProjectAggregate>): ProjectAggregate {
     timestamps: [],
     file_read_sessions: {},
     bash_error_sessions: {},
+    bash_command_pair_sessions: {},
     edit_sets: [],
     out_of_project_sessions: {},
     user_message_corpus: [],
@@ -405,5 +406,189 @@ describe("detectSkillCandidates", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].session_ids).toEqual(["s1"]);
     expect(findings[0].evidence).toContain("Read*3");
+  });
+});
+
+import { detectAllowlistGaps } from "./analyzer";
+import {
+  commandToAllowlistKey,
+  isAutoAllowed,
+  isArbitraryCode,
+  formatAllowPattern,
+  isReadOnlyMcp,
+} from "./allowlist";
+
+describe("commandToAllowlistKey", () => {
+  test("extracts head + subcommand for two-token commands", () => {
+    expect(commandToAllowlistKey("gh pr view 123")).toBe("gh pr");
+    expect(commandToAllowlistKey("git status -s")).toBe("git status");
+  });
+
+  test("handles single-token commands", () => {
+    expect(commandToAllowlistKey("ls")).toBe("ls");
+  });
+
+  test("strips env-var prefixes", () => {
+    expect(commandToAllowlistKey('export PATH="/x:$PATH" && gh pr list')).toBe("gh pr");
+    expect(commandToAllowlistKey("FOO=bar gh pr list")).toBe("gh pr");
+  });
+
+  test("strips sudo/timeout/rtk wrappers", () => {
+    expect(commandToAllowlistKey("sudo gh pr view")).toBe("gh pr");
+    expect(commandToAllowlistKey("timeout 10 gh pr list")).toBe("gh pr");
+    expect(commandToAllowlistKey("rtk gh pr diff")).toBe("gh pr");
+  });
+
+  test("rejects arbitrary-code interpreters", () => {
+    expect(commandToAllowlistKey("python3 -c 'print(1)'")).toBeNull();
+    expect(commandToAllowlistKey("bun run script")).toBeNull();
+    expect(commandToAllowlistKey("/bin/bash -c 'rm -rf /'")).toBeNull();
+  });
+
+  test("treats absolute-path scripts as their full path", () => {
+    expect(commandToAllowlistKey("/Users/nh/foo.sh --flag")).toBe("/Users/nh/foo.sh");
+  });
+
+  test("uses head only when second token is a flag/path/quoted arg", () => {
+    expect(commandToAllowlistKey("ls -la")).toBe("ls");
+    expect(commandToAllowlistKey("cat /etc/hosts")).toBe("cat");
+    expect(commandToAllowlistKey("echo 'hello'")).toBe("echo");
+  });
+
+  test("takes leading pipeline segment", () => {
+    expect(commandToAllowlistKey("gh pr list | jq .")).toBe("gh pr");
+    expect(commandToAllowlistKey("git status && git log")).toBe("git status");
+  });
+
+  test("returns null on empty input", () => {
+    expect(commandToAllowlistKey("")).toBeNull();
+    expect(commandToAllowlistKey("   ")).toBeNull();
+  });
+});
+
+describe("isAutoAllowed", () => {
+  test("returns true for any-args head commands", () => {
+    expect(isAutoAllowed("ls")).toBe(true);
+    expect(isAutoAllowed("ls -la")).toBe(true);
+    expect(isAutoAllowed("grep pattern")).toBe(true);
+  });
+
+  test("returns true for known git/gh subcommands", () => {
+    expect(isAutoAllowed("git status")).toBe(true);
+    expect(isAutoAllowed("gh pr")).toBe(true);
+    expect(isAutoAllowed("docker ps")).toBe(true);
+  });
+
+  test("returns false for non-auto-allowed commands", () => {
+    expect(isAutoAllowed("npm install")).toBe(false);
+    expect(isAutoAllowed("composer phpcs")).toBe(false);
+  });
+});
+
+describe("isArbitraryCode", () => {
+  test("flags interpreters", () => {
+    expect(isArbitraryCode("python3 -c")).toBe(true);
+    expect(isArbitraryCode("bun run")).toBe(true);
+    expect(isArbitraryCode("bash script")).toBe(true);
+  });
+
+  test("does not flag normal commands", () => {
+    expect(isArbitraryCode("git status")).toBe(false);
+    expect(isArbitraryCode("ls")).toBe(false);
+  });
+});
+
+describe("formatAllowPattern", () => {
+  test("wraps key in Bash() with wildcard suffix", () => {
+    expect(formatAllowPattern("gh pr")).toBe("Bash(gh pr *)");
+    expect(formatAllowPattern("/Users/nh/foo.sh")).toBe("Bash(/Users/nh/foo.sh *)");
+  });
+});
+
+describe("isReadOnlyMcp", () => {
+  test("returns true for read-shaped MCP tools", () => {
+    expect(isReadOnlyMcp("mcp__gitnexus__impact")).toBe(true);
+    expect(isReadOnlyMcp("mcp__claude_mem__search")).toBe(true);
+    expect(isReadOnlyMcp("mcp__zenhub__getIssuesInPipeline")).toBe(true);
+  });
+
+  test("returns false for write-shaped MCP tools", () => {
+    expect(isReadOnlyMcp("mcp__zenhub__setIssueEstimate")).toBe(false);
+    expect(isReadOnlyMcp("mcp__zenhub__createGitHubIssue")).toBe(false);
+    expect(isReadOnlyMcp("mcp__plugin__updateRecord")).toBe(false);
+  });
+
+  test("returns false for non-MCP tool names", () => {
+    expect(isReadOnlyMcp("Bash")).toBe(false);
+    expect(isReadOnlyMcp("Read")).toBe(false);
+  });
+});
+
+describe("detectAllowlistGaps", () => {
+  test("emits a finding for read-only commands ≥3 sessions not in existing allowlist", () => {
+    const agg = makeAgg({
+      bash_command_pair_sessions: {
+        "composer phpcs": ["s1", "s2", "s3"],
+        "ls": ["s1", "s2", "s3", "s4"], // auto-allowed, should be filtered
+      },
+    });
+    const findings = detectAllowlistGaps(agg, new Set());
+    expect(findings).toHaveLength(1);
+    expect(findings[0].pattern_type).toBe("allowlist-gap");
+    expect(findings[0].fingerprint.primary_key).toBe("Bash(composer phpcs *)");
+    expect(findings[0].recommended_surface).toBe("settings-allowlist");
+  });
+
+  test("filters out commands below the 3-session threshold", () => {
+    const agg = makeAgg({
+      bash_command_pair_sessions: {
+        "composer phpcs": ["s1", "s2"],
+      },
+    });
+    expect(detectAllowlistGaps(agg, new Set())).toHaveLength(0);
+  });
+
+  test("filters out arbitrary-code interpreters even at high frequency", () => {
+    const agg = makeAgg({
+      bash_command_pair_sessions: {
+        // commandToAllowlistKey would have rejected these at extraction time,
+        // but defense-in-depth — the detector also rejects them.
+        "python3": ["s1", "s2", "s3", "s4", "s5"],
+      },
+    });
+    expect(detectAllowlistGaps(agg, new Set())).toHaveLength(0);
+  });
+
+  test("skips entries already present in the allowlist (wildcard form)", () => {
+    const agg = makeAgg({
+      bash_command_pair_sessions: {
+        "composer phpcs": ["s1", "s2", "s3"],
+      },
+    });
+    const existing = new Set(["Bash(composer phpcs *)"]);
+    expect(detectAllowlistGaps(agg, existing)).toHaveLength(0);
+  });
+
+  test("skips entries already present in the allowlist (exact form)", () => {
+    const agg = makeAgg({
+      bash_command_pair_sessions: {
+        "composer phpcs": ["s1", "s2", "s3"],
+      },
+    });
+    const existing = new Set(["Bash(composer phpcs)"]);
+    expect(detectAllowlistGaps(agg, existing)).toHaveLength(0);
+  });
+
+  test("sorts by descending session count", () => {
+    const agg = makeAgg({
+      bash_command_pair_sessions: {
+        "composer phpcs": ["s1", "s2", "s3"],
+        "npm install": ["s1", "s2", "s3", "s4", "s5", "s6"],
+      },
+    });
+    const findings = detectAllowlistGaps(agg, new Set());
+    expect(findings).toHaveLength(2);
+    expect(findings[0].fingerprint.primary_key).toBe("Bash(npm install *)");
+    expect(findings[1].fingerprint.primary_key).toBe("Bash(composer phpcs *)");
   });
 });

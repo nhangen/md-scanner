@@ -100,6 +100,7 @@ For each detected pattern, determine the target:
 - Pattern across multiple projects → **`~/.claude/CLAUDE.md`** (global)
 - Pattern is a behavioral constraint ("never X", "always Y") → **`~/.claude/rules/<name>.md`** (follow creating-rules process: YAML frontmatter with `description` and `globs`, matching section in `~/.claude/CLAUDE.md`)
 - Pattern is environment/tool context → **memory file** in the project's memory directory
+- Pattern is a read-only command/MCP tool that prompts repeatedly (`allowlist-gap`) → **project `.claude/settings.local.json`** under `permissions.allow[]`. If the file doesn't exist, create it (gitignored convention). Don't write to the committed `.claude/settings.json` unless the project explicitly uses that path for personal allowlists.
 - Pattern is a repeated workflow → **flag as skill candidate** (no auto-creation, just recommend)
 
 ### Rank

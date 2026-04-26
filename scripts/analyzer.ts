@@ -19,6 +19,12 @@ import {
   type TrendDirection,
   type RecommendedSurface,
 } from "./types";
+import {
+  commandToAllowlistKey,
+  formatAllowPattern,
+  isAutoAllowed,
+  isArbitraryCode,
+} from "./allowlist";
 
 // ---------------------------------------------------------------------------
 // Filtering
@@ -207,6 +213,7 @@ export function buildProjectAggregates(
         timestamps: [],
         file_read_sessions: {},
         bash_error_sessions: {},
+        bash_command_pair_sessions: {},
         edit_sets: [],
         out_of_project_sessions: {},
         user_message_corpus: [],
@@ -232,6 +239,14 @@ export function buildProjectAggregates(
         if (!agg.bash_error_sessions[firstWord]) agg.bash_error_sessions[firstWord] = [];
         if (!agg.bash_error_sessions[firstWord].includes(ext.session_id)) {
           agg.bash_error_sessions[firstWord].push(ext.session_id);
+        }
+      }
+
+      const pairKey = commandToAllowlistKey(cmd.cmd);
+      if (pairKey) {
+        if (!agg.bash_command_pair_sessions[pairKey]) agg.bash_command_pair_sessions[pairKey] = [];
+        if (!agg.bash_command_pair_sessions[pairKey].includes(ext.session_id)) {
+          agg.bash_command_pair_sessions[pairKey].push(ext.session_id);
         }
       }
     }
@@ -364,6 +379,43 @@ export function detectCommandErrors(agg: ProjectAggregate): DetectorFinding[] {
         pattern_type: "command-error",
         target_file: "",
         primary_key: cmd,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectAllowlistGaps(
+  agg: ProjectAggregate,
+  existingAllowlist: Set<string>,
+): DetectorFinding[] {
+  const tsMap = buildTimestampMap(agg);
+  const findings: DetectorFinding[] = [];
+
+  for (const [key, sessions] of Object.entries(agg.bash_command_pair_sessions)) {
+    if (sessions.length < 3) continue;
+    if (isAutoAllowed(key)) continue;
+    if (isArbitraryCode(key)) continue;
+
+    const pattern = formatAllowPattern(key);
+    if (existingAllowlist.has(pattern)) continue;
+
+    const exact = `Bash(${key})`;
+    if (existingAllowlist.has(exact)) continue;
+
+    findings.push({
+      pattern_type: "allowlist-gap",
+      evidence: `Command "${key}" ran in ${sessions.length} sessions; not auto-allowed and not in project allowlist. Suggested entry: ${pattern}`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: 0,
+      recommended_surface: "settings-allowlist",
+      fingerprint: {
+        pattern_type: "allowlist-gap",
+        target_file: ".claude/settings.local.json",
+        primary_key: pattern,
       },
     });
   }

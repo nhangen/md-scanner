@@ -111,6 +111,7 @@ export interface ProjectAggregate {
   timestamps: string[];
   file_read_sessions: Record<string, string[]>;
   bash_error_sessions: Record<string, string[]>;
+  bash_command_pair_sessions: Record<string, string[]>;
   edit_sets: Array<{ session_id: string; files: string[] }>;
   out_of_project_sessions: Record<string, string[]>;
   user_message_corpus: Array<{ session_id: string; text: string }>;
@@ -134,7 +135,8 @@ export type RecommendedSurface =
   | "global-claude-md"
   | "rules"
   | "memory"
-  | "skill-candidate";
+  | "skill-candidate"
+  | "settings-allowlist";
 
 export interface DetectorFinding {
   pattern_type: string;

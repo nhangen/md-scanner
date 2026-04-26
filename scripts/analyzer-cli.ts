@@ -17,7 +17,9 @@ import {
   detectUserMessageFrequency,
   detectSkillCandidates,
   detectContextBloat,
+  detectAllowlistGaps,
 } from "./analyzer";
+import { loadExistingAllowlist } from "./allowlist";
 import type { DetectorFinding, ProjectAggregate } from "./types";
 
 const STATE_DIR = join(process.env.HOME ?? "~", ".claude", "context-gaps");
@@ -162,9 +164,12 @@ async function main(): Promise<void> {
   for (const [canonical, agg] of aggregates) {
     if (agg.session_count < 2) continue;
 
+    const existingAllowlist = loadExistingAllowlist(canonical);
+
     const rawFindings: DetectorFinding[] = [
       ...detectRepeatedFileReads(agg),
       ...detectCommandErrors(agg),
+      ...detectAllowlistGaps(agg, existingAllowlist),
       ...detectFilePairCoOccurrence(agg),
       ...detectCrossProjectPaths(agg),
       ...detectUserMessageFrequency(agg),
