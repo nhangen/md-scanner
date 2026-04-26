@@ -832,6 +832,36 @@ describe("pathIsDocumented", () => {
   test("returns false when CLAUDE.md does not exist", () => {
     expect(pathIsDocumented("/some/path", "/does/not/exist", null)).toBe(false);
   });
+
+  test("does not match short basenames (length <= 4) to avoid false positives", () => {
+    // 'api' is 3 chars — too short to safely use as a basename match. Even
+    // though the doc literally contains "api" inside "## API Notes", we
+    // shouldn't say a query for /elsewhere/api is documented based on that.
+    const { projectPath, cleanup } = makeTempProject(
+      "## API Notes\n\nThe api layer is documented elsewhere.\n",
+    );
+    try {
+      // Path's basename is 'api' (3 chars). Doc contains the word 'api'
+      // (in "## API Notes" and "api layer"). length > 4 guard means no match.
+      expect(pathIsDocumented("/elsewhere/some-dir/api", projectPath, null)).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("does match longer basenames (length > 4) when content includes them", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Notes\n\nSee deploy.sh for instructions.\n",
+    );
+    try {
+      // basename 'deploy.sh' (9 chars) is over the 4-char threshold; substring
+      // appears in the doc body, so this counts as documented even though the
+      // full path doesn't appear.
+      expect(pathIsDocumented("/some/other/dir/deploy.sh", projectPath, null)).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("detectClaudeMdUnusedSections", () => {
@@ -865,6 +895,44 @@ describe("detectClaudeMdUnusedSections", () => {
         bash_command_pair_sessions: {},
       });
       expect(detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`)).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("requires BOTH commands and paths to be unused before flagging (mixed-signal case)", () => {
+    // Regression guard: if cmdUsed || pathUsed is ever flipped to &&, this fails.
+    // Section has one observed command and one unobserved path → must NOT flag.
+    const { projectPath, cleanup } = makeTempProject(
+      "## Mixed\n\nUse `composer phpcs` for lint. See `~/never-touched.txt` for legacy notes.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 12,
+        session_ids: Array.from({ length: 12 }, (_, i) => `s${i}`),
+        bash_command_pair_sessions: { "composer phpcs": ["s1", "s2", "s3"] },
+        file_read_sessions: {},
+      });
+      expect(detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`)).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("flags when BOTH commands AND paths are unused (mixed-signal, neither matches)", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Stale Mixed\n\nUse `frobnicate widget` to deploy. See `~/never-touched.txt`.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 12,
+        session_ids: Array.from({ length: 12 }, (_, i) => `s${i}`),
+        bash_command_pair_sessions: { "composer phpcs": ["s1", "s2", "s3"] },
+        file_read_sessions: { "/Users/me/active.txt": ["s1"] },
+      });
+      const findings = detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].fingerprint.primary_key).toBe("Stale Mixed");
     } finally {
       cleanup();
     }
