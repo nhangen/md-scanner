@@ -131,9 +131,13 @@ export function commandToAllowlistKey(rawCmd: string): string | null {
   let cmd = rawCmd.trim();
   if (!cmd) return null;
 
-  // Strip leading env-var assignments: `export X=Y && cmd` or `X=Y cmd`
-  cmd = cmd.replace(/^(export\s+\S+="?[^"]*"?\s*&&\s*)+/, "");
-  cmd = cmd.replace(/^(?:[A-Z_][A-Z0-9_]*=\S+\s+)+/, "");
+  // Strip leading env-var assignments: `export X=val && cmd`, `export X="val" && cmd`,
+  // `export X='val' && cmd`, or `X=val cmd`. The value-matching alternation handles
+  // unquoted, double-quoted, and single-quoted values; without the single-quoted
+  // branch, `export X='foo' && cmd` would fall through and the head would become
+  // `export`.
+  cmd = cmd.replace(/^(export\s+\S+=(?:"[^"]*"|'[^']*'|\S*)\s*&&\s*)+/, "");
+  cmd = cmd.replace(/^(?:[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)+/, "");
 
   // Strip prefixes that don't change the underlying command identity
   while (true) {
@@ -141,6 +145,10 @@ export function commandToAllowlistKey(rawCmd: string): string | null {
     if (!m) break;
     cmd = m[1];
   }
+
+  // Defense-in-depth: if env-var stripping failed (e.g., novel shell shape),
+  // an `export` head must never become an allowlist key.
+  if (cmd.startsWith("export ")) return null;
 
   // Take leading pipeline/conjunction segment
   cmd = cmd.split(/\s*(?:\||&&|\|\||;|>|<)\s*/)[0].trim();

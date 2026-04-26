@@ -454,6 +454,20 @@ describe("commandToAllowlistKey", () => {
     expect(commandToAllowlistKey("FOO=bar gh pr list")).toBe("gh pr");
   });
 
+  test("strips single-quoted env-var values", () => {
+    expect(commandToAllowlistKey("export X='foo bar' && gh pr list")).toBe("gh pr");
+    expect(commandToAllowlistKey("X='quoted value' gh pr list")).toBe("gh pr");
+  });
+
+  test("strips unquoted env-var values without ambiguity", () => {
+    expect(commandToAllowlistKey("export X=plain && gh pr list")).toBe("gh pr");
+  });
+
+  test("returns null on bare 'export' (defense-in-depth: never allowlist export)", () => {
+    expect(commandToAllowlistKey("export X=novel-shape gh pr list")).toBeNull();
+    expect(commandToAllowlistKey("export PATH")).toBeNull();
+  });
+
   test("strips sudo/timeout/rtk wrappers", () => {
     expect(commandToAllowlistKey("sudo gh pr view")).toBe("gh pr");
     expect(commandToAllowlistKey("timeout 10 gh pr list")).toBe("gh pr");
