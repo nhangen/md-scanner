@@ -30,12 +30,8 @@ const COMMAND_PATTERN = /`([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z][a-zA-Z0-9_-]*)?(
 const PATH_PATTERN = /`((?:\/|~\/)[A-Za-z0-9_./~-]+)`/g;
 
 /**
- * Parse a CLAUDE.md (or any md file) into its `## ` sections. Each section
- * tracks the title, raw body, and extracted command/path/rule tokens for
- * downstream matching.
- *
- * Returns [] on read or parse failure — the analyzer's invariant is that
- * detectors never crash the run.
+ * Returns [] on read failure — the analyzer's invariant is that detectors
+ * never crash the run.
  */
 export function parseClaudeMdSections(filePath: string): ClaudeMdSection[] {
   const result = safeReadFile(filePath);
@@ -132,10 +128,6 @@ export function sectionHasCommandUsage(
   return false;
 }
 
-/**
- * Returns true if any of the section's paths matches any read/edit file path
- * across sessions. Substring match after `~`-normalization.
- */
 export function sectionHasPathUsage(
   section: ClaudeMdSection,
   observedPaths: Set<string>,

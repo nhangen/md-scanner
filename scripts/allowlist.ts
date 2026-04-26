@@ -22,7 +22,6 @@ const AUTO_ALLOW_ANY_ARGS = new Set([
   "rev", "fold", "expand", "unexpand", "fmt", "comm", "cmp", "numfmt",
   "readlink", "diff", "true", "false", "sleep", "which", "type", "expr",
   "test", "getconf", "seq", "tsort", "pr", "echo", "printf", "ls", "cd", "find",
-  // Validated read-only with safe flags
   "xargs", "file", "sed", "sort", "man", "help", "netstat", "ps", "base64",
   "grep", "egrep", "fgrep", "sha256sum", "sha1sum", "md5sum", "tree", "date",
   "hostname", "info", "lsof", "pgrep", "tput", "ss", "fd", "fdfind", "aki",
@@ -31,15 +30,12 @@ const AUTO_ALLOW_ANY_ARGS = new Set([
 
 // Auto-allowed git/gh/docker subcommands. Stored as "tool subcmd" keys.
 const AUTO_ALLOW_PAIRS = new Set([
-  // git read-only
   "git status", "git log", "git diff", "git show", "git blame", "git branch",
   "git tag", "git remote", "git ls-files", "git ls-remote", "git config",
   "git rev-parse", "git describe", "git stash", "git reflog", "git shortlog",
   "git cat-file", "git for-each-ref", "git worktree",
-  // gh read-only
   "gh pr", "gh issue", "gh run", "gh workflow", "gh repo", "gh release",
   "gh api", "gh auth",
-  // docker read-only
   "docker ps", "docker images", "docker logs", "docker inspect",
 ]);
 
@@ -57,16 +53,11 @@ const ARBITRARY_CODE_EXECUTORS = new Set([
 // review — auto-allowlisting them would convert "ran rm 50 times" into
 // "permission to run rm without prompting forever".
 const WRITE_SHAPED_HEADS = new Set([
-  // Filesystem
   "rm", "rmdir", "mv", "cp", "mkdir", "ln", "touch", "chmod", "chown", "chgrp",
   "dd", "shred", "truncate",
-  // Process
   "kill", "pkill", "killall",
-  // Archive (writes)
   "tar", "zip", "unzip", "gunzip", "gzip",
-  // Network writes
   "curl", "wget", "scp", "rsync",
-  // Containers (mutate state)
   "docker", "podman", "kubectl",
   // Git mutating verbs (when used at root level — rare without subcommand)
   "git",
@@ -78,12 +69,10 @@ const WRITE_SHAPED_HEADS = new Set([
 // tag / remote` etc.; everything mutating in the git/gh/docker namespaces
 // is enumerated here.
 const WRITE_SHAPED_PAIRS = new Set([
-  // git
   "git push", "git commit", "git merge", "git rebase", "git reset",
   "git apply", "git rm", "git mv", "git stash", "git checkout", "git switch",
   "git restore", "git revert", "git cherry-pick", "git pull", "git fetch",
   "git clean", "git gc", "git filter-branch", "git tag",
-  // gh (mutating)
   "gh pr create", "gh pr edit", "gh pr merge", "gh pr close", "gh pr reopen",
   "gh pr review", "gh pr comment", "gh pr ready", "gh pr checkout",
   "gh issue create", "gh issue edit", "gh issue close", "gh issue reopen",
@@ -95,12 +84,10 @@ const WRITE_SHAPED_PAIRS = new Set([
   "gh workflow run", "gh workflow enable", "gh workflow disable",
   "gh run cancel", "gh run delete", "gh run rerun",
   "gh auth login", "gh auth logout", "gh auth refresh",
-  // docker (mutating)
   "docker run", "docker exec", "docker rm", "docker rmi", "docker stop",
   "docker start", "docker restart", "docker kill", "docker pull", "docker push",
   "docker build", "docker tag", "docker commit", "docker save", "docker load",
   "docker network", "docker volume", "docker compose",
-  // package managers
   "npm install", "npm uninstall", "npm publish", "npm run", "npm exec",
   "npm update", "npm audit", "npm link", "npm version",
   "yarn add", "yarn remove", "yarn install", "yarn publish", "yarn run",
@@ -112,7 +99,6 @@ const WRITE_SHAPED_PAIRS = new Set([
   "go install", "go build", "go run", "go get",
   "gem install", "gem uninstall", "gem build", "gem push",
   "brew install", "brew uninstall", "brew upgrade", "brew tap",
-  // wp-cli (mutating)
   "wp plugin install", "wp plugin activate", "wp plugin deactivate",
   "wp plugin delete", "wp theme install", "wp theme activate",
   "wp post create", "wp post update", "wp post delete",

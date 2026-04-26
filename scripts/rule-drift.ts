@@ -39,8 +39,8 @@ export function stripFrontmatter(content: string): string {
 }
 
 /**
- * Normalize quote characters for diff purposes. The sync-rules skill discovered
- * twice today that smart quotes vs straight quotes generate spurious diffs.
+ * Normalize quote characters for diff purposes. Smart quotes and en/em dashes
+ * from editor auto-format produce spurious diffs against ASCII source.
  */
 export function normalizeQuotes(text: string): string {
   return text
@@ -128,11 +128,8 @@ function listRuleNames(dir: string, ext: string): Set<string> {
   }
 }
 
-/**
- * Wraps detectRuleDriftEntries as a DetectorFinding[]. One finding per drifted
- * rule. Session count is 1 (these are config-only findings, not session-derived).
- */
 export function detectRuleDrift(): DetectorFinding[] {
+  // session_count is 1 because these are config-only findings, not session-derived.
   const entries = detectRuleDriftEntries();
   return entries.map((entry) => {
     let evidence: string;

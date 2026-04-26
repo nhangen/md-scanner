@@ -33,11 +33,6 @@ import {
   pathIsDocumented,
 } from "./claudemd";
 import { safeReadFile, safeParseJson } from "./safe-read";
-
-// ---------------------------------------------------------------------------
-// Filtering
-// ---------------------------------------------------------------------------
-
 const OBSERVER_PATH_MARKERS = ["observer-sessions", ".claude-mem"];
 const OBSERVER_TOOLS = new Set(["ToolSearch", "TaskCreate", "TaskUpdate", "Skill"]);
 
@@ -59,11 +54,6 @@ export function cleanUserMessages(messages: UserMessage[]): UserMessage[] {
     return true;
   });
 }
-
-// ---------------------------------------------------------------------------
-// Path utilities
-// ---------------------------------------------------------------------------
-
 const canonCache = new Map<string, string>();
 
 export function canonicalizePath(projectPath: string): string {
@@ -136,11 +126,6 @@ export function rleCompress(sequence: string[]): string {
   parts.push(count > 1 ? `${current}*${count}` : current);
   return parts.join(", ");
 }
-
-// ---------------------------------------------------------------------------
-// Index management
-// ---------------------------------------------------------------------------
-
 export function loadIndex(indexPath: string): AnalyzerIndex {
   const fresh = (): AnalyzerIndex => ({
     schema_version: ANALYZER_SCHEMA_VERSION,
@@ -167,11 +152,6 @@ export function saveIndex(indexPath: string, index: AnalyzerIndex): void {
   writeFileSync(tmp, JSON.stringify(index, null, 2));
   renameSync(tmp, indexPath);
 }
-
-// ---------------------------------------------------------------------------
-// Pending file loading
-// ---------------------------------------------------------------------------
-
 export function loadNewPendingFiles(
   stateDir: string,
   index: AnalyzerIndex,
@@ -222,11 +202,6 @@ export function loadNewPendingFiles(
 
   return { extracts, updatedIndex };
 }
-
-// ---------------------------------------------------------------------------
-// Aggregation
-// ---------------------------------------------------------------------------
-
 export function buildProjectAggregates(
   extracts: SessionExtract[],
 ): Map<string, ProjectAggregate> {
@@ -314,11 +289,6 @@ export function buildProjectAggregates(
 
   return map;
 }
-
-// ---------------------------------------------------------------------------
-// Trend
-// ---------------------------------------------------------------------------
-
 export function computeTrend(
   sessionIds: string[],
   allTimestamps: Map<string, string>,
@@ -350,11 +320,6 @@ export function computeTrend(
   if (oldCount > sessionIds.length * 0.5) return "down";
   return "steady";
 }
-
-// ---------------------------------------------------------------------------
-// Detectors
-// ---------------------------------------------------------------------------
-
 function buildTimestampMap(agg: ProjectAggregate): Map<string, string> {
   const m = new Map<string, string>();
   for (let i = 0; i < agg.session_ids.length; i++) {
@@ -726,11 +691,6 @@ export function detectContextBloat(
     },
   }];
 }
-
-// ---------------------------------------------------------------------------
-// Vault detection
-// ---------------------------------------------------------------------------
-
 export function resolveVaultPath(): string | null {
   try {
     const pluginDir = join(
@@ -763,11 +723,6 @@ export function resolveVaultPath(): string | null {
     return null;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Report output
-// ---------------------------------------------------------------------------
-
 export function resolveReportDir(): string {
   const vault = resolveVaultPath();
   let dir: string;
