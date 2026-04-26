@@ -5,6 +5,7 @@ import {
   fnv1aHash4,
   projectSlug,
   rleCompress,
+  claudeProjectDirId,
 } from "./analyzer";
 import type { SessionExtract, UserMessage } from "./types";
 
@@ -161,6 +162,25 @@ describe("rleCompress", () => {
 
   test("handles alternating elements", () => {
     expect(rleCompress(["Read", "Edit", "Read", "Edit"])).toBe("Read, Edit, Read, Edit");
+  });
+});
+
+describe("claudeProjectDirId", () => {
+  test("replaces slashes with dashes", () => {
+    expect(claudeProjectDirId("/Users/me/repo")).toBe("-Users-me-repo");
+  });
+
+  test("replaces spaces with dashes (Local Sites case)", () => {
+    expect(claudeProjectDirId("/Users/me/Local Sites/app/public")).toBe(
+      "-Users-me-Local-Sites-app-public",
+    );
+  });
+
+  test("matches the on-disk Claude Code memory dir convention", () => {
+    // Real example from ~/.claude/projects/ on this machine
+    expect(
+      claudeProjectDirId("/Users/nhangen/Local Sites/appoptinmonstertest/app/public"),
+    ).toBe("-Users-nhangen-Local-Sites-appoptinmonstertest-app-public");
   });
 });
 
@@ -757,9 +777,9 @@ describe("sectionHasCommandUsage", () => {
     expect(sectionHasCommandUsage(section, new Set(["git status"]))).toBe(false);
   });
 
-  test("returns true when section has no commands (insufficient evidence to claim unused)", () => {
+  test("returns false when section has no commands (caller falls through to path check)", () => {
     const section = { title: "X", body: "prose only", commands: [], paths: [], rule_refs: [] };
-    expect(sectionHasCommandUsage(section, new Set())).toBe(true);
+    expect(sectionHasCommandUsage(section, new Set())).toBe(false);
   });
 });
 
@@ -830,6 +850,42 @@ describe("detectClaudeMdUnusedSections", () => {
         session_count: 5,
         session_ids: ["s1", "s2", "s3", "s4", "s5"],
         bash_command_pair_sessions: {},
+      });
+      expect(detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`)).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("flags path-only sections whose paths are never observed", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Stale Paths\n\nReference: `/Users/me/never-touched.txt` and `~/old/data.csv`.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 12,
+        session_ids: Array.from({ length: 12 }, (_, i) => `s${i}`),
+        bash_command_pair_sessions: {},
+        file_read_sessions: {},
+      });
+      const findings = detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].fingerprint.primary_key).toBe("Stale Paths");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("skips path-only sections when at least one path IS observed", () => {
+    const { projectPath, cleanup } = makeTempProject(
+      "## Used Paths\n\nReference: `/Users/me/active.txt`.\n",
+    );
+    try {
+      const agg = makeAgg({
+        session_count: 12,
+        session_ids: Array.from({ length: 12 }, (_, i) => `s${i}`),
+        bash_command_pair_sessions: {},
+        file_read_sessions: { "/Users/me/active.txt": ["s1"] },
       });
       expect(detectClaudeMdUnusedSections(agg, `${projectPath}/CLAUDE.md`)).toHaveLength(0);
     } finally {

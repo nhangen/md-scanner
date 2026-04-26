@@ -96,6 +96,21 @@ export function fnv1aHash4(input: string): string {
   return hex.slice(-4);
 }
 
+/**
+ * Convert a canonical path to the directory id Claude Code uses under
+ * `~/.claude/projects/<id>/`. The convention is leading `-` followed by the
+ * absolute path with `/` and ` ` (space) replaced with `-`.
+ *
+ * Example: `/Users/foo/Local Sites/bar/baz` →
+ *   `-Users-foo-Local-Sites-bar-baz`.
+ *
+ * Distinct from `projectSlug()`, which uses `basename + hash` for md-scanner's
+ * own report file naming.
+ */
+export function claudeProjectDirId(canonicalPath: string): string {
+  return canonicalPath.replace(/[/ ]/g, "-");
+}
+
 export function projectSlug(canonicalPath: string): string {
   const base = basename(canonicalPath)
     .replace(/[^a-z0-9]/gi, "-")

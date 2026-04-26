@@ -20,6 +20,7 @@ import {
   detectAllowlistGaps,
   detectClaudeMdUnusedSections,
   detectClaudeMdUndocumentedRepeat,
+  claudeProjectDirId,
 } from "./analyzer";
 import { loadExistingAllowlist } from "./allowlist";
 import { detectRuleDrift } from "./rule-drift";
@@ -173,7 +174,7 @@ async function main(): Promise<void> {
       process.env.HOME ?? "~",
       ".claude",
       "projects",
-      canonical.replace(/\//g, "-").replace(/^-/, "-"),
+      claudeProjectDirId(canonical),
       "memory",
     );
 

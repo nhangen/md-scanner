@@ -128,12 +128,19 @@ export function normalizePath(path: string, home: string = process.env.HOME ?? "
  * Returns true if any of the section's commands appears as the leading 1-2
  * tokens of any session's bash commands. Cheap substring check (case-sensitive
  * for command tokens — case usually matters in shell).
+ *
+ * Returns false when the section has no extracted commands. The caller
+ * (`detectClaudeMdUnusedSections`) treats this as "no command-usage signal"
+ * and falls through to path matching, rather than masking a path-only
+ * mismatch with a false-positive command-match. The early-return at the top
+ * of the detector loop already skips prose-only sections (no commands AND no
+ * paths), so this won't yield spurious flags.
  */
 export function sectionHasCommandUsage(
   section: ClaudeMdSection,
   bashCommandKeys: Set<string>,
 ): boolean {
-  if (section.commands.length === 0) return true; // can't claim "unused" without evidence
+  if (section.commands.length === 0) return false;
   for (const cmd of section.commands) {
     if (bashCommandKeys.has(cmd)) return true;
     // tolerate single-token sections matching head of any pair
