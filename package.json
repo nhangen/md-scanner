@@ -1,6 +1,6 @@
 {
   "name": "md-scanner",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Behavioral markdown documentation scanner for Claude Code",
   "scripts": {
     "typecheck": "bun tsc --noEmit",

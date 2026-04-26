@@ -19,11 +19,20 @@ import {
   type TrendDirection,
   type RecommendedSurface,
 } from "./types";
-
-// ---------------------------------------------------------------------------
-// Filtering
-// ---------------------------------------------------------------------------
-
+import {
+  commandToAllowlistKey,
+  formatAllowPattern,
+  isAutoAllowed,
+  isArbitraryCode,
+  isWriteShaped,
+} from "./allowlist";
+import {
+  parseClaudeMdSections,
+  sectionHasCommandUsage,
+  sectionHasPathUsage,
+  pathIsDocumented,
+} from "./claudemd";
+import { safeReadFile, safeParseJson } from "./safe-read";
 const OBSERVER_PATH_MARKERS = ["observer-sessions", ".claude-mem"];
 const OBSERVER_TOOLS = new Set(["ToolSearch", "TaskCreate", "TaskUpdate", "Skill"]);
 
@@ -45,11 +54,6 @@ export function cleanUserMessages(messages: UserMessage[]): UserMessage[] {
     return true;
   });
 }
-
-// ---------------------------------------------------------------------------
-// Path utilities
-// ---------------------------------------------------------------------------
-
 const canonCache = new Map<string, string>();
 
 export function canonicalizePath(projectPath: string): string {
@@ -83,6 +87,21 @@ export function fnv1aHash4(input: string): string {
   return hex.slice(-4);
 }
 
+/**
+ * Convert a canonical path to the directory id Claude Code uses under
+ * `~/.claude/projects/<id>/`. The convention is leading `-` followed by the
+ * absolute path with `/` and ` ` (space) replaced with `-`.
+ *
+ * Example: `/Users/foo/Local Sites/bar/baz` →
+ *   `-Users-foo-Local-Sites-bar-baz`.
+ *
+ * Distinct from `projectSlug()`, which uses `basename + hash` for md-scanner's
+ * own report file naming.
+ */
+export function claudeProjectDirId(canonicalPath: string): string {
+  return canonicalPath.replace(/[/ ]/g, "-");
+}
+
 export function projectSlug(canonicalPath: string): string {
   const base = basename(canonicalPath)
     .replace(/[^a-z0-9]/gi, "-")
@@ -107,22 +126,25 @@ export function rleCompress(sequence: string[]): string {
   parts.push(count > 1 ? `${current}*${count}` : current);
   return parts.join(", ");
 }
-
-// ---------------------------------------------------------------------------
-// Index management
-// ---------------------------------------------------------------------------
-
 export function loadIndex(indexPath: string): AnalyzerIndex {
-  try {
-    const raw = readFileSync(indexPath, "utf-8");
-    return JSON.parse(raw) as AnalyzerIndex;
-  } catch {
-    return {
-      schema_version: ANALYZER_SCHEMA_VERSION,
-      last_run: "",
-      processed_files: {},
-    };
+  const fresh = (): AnalyzerIndex => ({
+    schema_version: ANALYZER_SCHEMA_VERSION,
+    last_run: "",
+    processed_files: {},
+  });
+
+  const read = safeReadFile(indexPath);
+  if (!read.ok) {
+    // Missing on first run is normal; unreadable is counted in degraded stats.
+    return fresh();
   }
+  const parsed = safeParseJson<AnalyzerIndex>(read.content, indexPath);
+  if (!parsed.ok) {
+    // Corrupted index → re-process every pending file. The degradation counter
+    // surfaces this so the user knows why a run took unexpectedly long.
+    return fresh();
+  }
+  return parsed.value;
 }
 
 export function saveIndex(indexPath: string, index: AnalyzerIndex): void {
@@ -130,11 +152,6 @@ export function saveIndex(indexPath: string, index: AnalyzerIndex): void {
   writeFileSync(tmp, JSON.stringify(index, null, 2));
   renameSync(tmp, indexPath);
 }
-
-// ---------------------------------------------------------------------------
-// Pending file loading
-// ---------------------------------------------------------------------------
-
 export function loadNewPendingFiles(
   stateDir: string,
   index: AnalyzerIndex,
@@ -185,11 +202,6 @@ export function loadNewPendingFiles(
 
   return { extracts, updatedIndex };
 }
-
-// ---------------------------------------------------------------------------
-// Aggregation
-// ---------------------------------------------------------------------------
-
 export function buildProjectAggregates(
   extracts: SessionExtract[],
 ): Map<string, ProjectAggregate> {
@@ -207,6 +219,7 @@ export function buildProjectAggregates(
         timestamps: [],
         file_read_sessions: {},
         bash_error_sessions: {},
+        bash_command_pair_sessions: {},
         edit_sets: [],
         out_of_project_sessions: {},
         user_message_corpus: [],
@@ -232,6 +245,14 @@ export function buildProjectAggregates(
         if (!agg.bash_error_sessions[firstWord]) agg.bash_error_sessions[firstWord] = [];
         if (!agg.bash_error_sessions[firstWord].includes(ext.session_id)) {
           agg.bash_error_sessions[firstWord].push(ext.session_id);
+        }
+      }
+
+      const pairKey = commandToAllowlistKey(cmd.cmd);
+      if (pairKey) {
+        if (!agg.bash_command_pair_sessions[pairKey]) agg.bash_command_pair_sessions[pairKey] = [];
+        if (!agg.bash_command_pair_sessions[pairKey].includes(ext.session_id)) {
+          agg.bash_command_pair_sessions[pairKey].push(ext.session_id);
         }
       }
     }
@@ -268,11 +289,6 @@ export function buildProjectAggregates(
 
   return map;
 }
-
-// ---------------------------------------------------------------------------
-// Trend
-// ---------------------------------------------------------------------------
-
 export function computeTrend(
   sessionIds: string[],
   allTimestamps: Map<string, string>,
@@ -304,11 +320,6 @@ export function computeTrend(
   if (oldCount > sessionIds.length * 0.5) return "down";
   return "steady";
 }
-
-// ---------------------------------------------------------------------------
-// Detectors
-// ---------------------------------------------------------------------------
-
 function buildTimestampMap(agg: ProjectAggregate): Map<string, string> {
   const m = new Map<string, string>();
   for (let i = 0; i < agg.session_ids.length; i++) {
@@ -364,6 +375,122 @@ export function detectCommandErrors(agg: ProjectAggregate): DetectorFinding[] {
         pattern_type: "command-error",
         target_file: "",
         primary_key: cmd,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectAllowlistGaps(
+  agg: ProjectAggregate,
+  existingAllowlist: Set<string>,
+): DetectorFinding[] {
+  const tsMap = buildTimestampMap(agg);
+  const findings: DetectorFinding[] = [];
+
+  for (const [key, sessions] of Object.entries(agg.bash_command_pair_sessions)) {
+    if (sessions.length < 3) continue;
+    if (isAutoAllowed(key)) continue;
+    if (isArbitraryCode(key)) continue;
+    if (isWriteShaped(key)) continue;
+
+    const pattern = formatAllowPattern(key);
+    if (existingAllowlist.has(pattern)) continue;
+
+    const exact = `Bash(${key})`;
+    if (existingAllowlist.has(exact)) continue;
+
+    findings.push({
+      pattern_type: "allowlist-gap",
+      evidence: `Command "${key}" ran in ${sessions.length} sessions; not auto-allowed and not in project allowlist. Suggested entry: ${pattern}`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: 0,
+      recommended_surface: "settings-allowlist",
+      fingerprint: {
+        pattern_type: "allowlist-gap",
+        target_file: ".claude/settings.local.json",
+        primary_key: pattern,
+      },
+    });
+  }
+
+  return findings.sort((a, b) => b.session_count - a.session_count);
+}
+
+export function detectClaudeMdUnusedSections(
+  agg: ProjectAggregate,
+  claudeMdPath: string,
+): DetectorFinding[] {
+  const findings: DetectorFinding[] = [];
+  const sections = parseClaudeMdSections(claudeMdPath);
+  if (sections.length === 0) return findings;
+
+  const minSessions = 10;
+  if (agg.session_count < minSessions) return findings;
+
+  const bashCommandKeys = new Set(Object.keys(agg.bash_command_pair_sessions));
+  const observedPaths = new Set<string>([
+    ...Object.keys(agg.file_read_sessions),
+    ...agg.edit_sets.flatMap((e) => e.files),
+  ]);
+
+  const tsMap = buildTimestampMap(agg);
+
+  for (const section of sections) {
+    if (section.commands.length === 0 && section.paths.length === 0) continue;
+
+    const cmdUsed = sectionHasCommandUsage(section, bashCommandKeys);
+    const pathUsed = sectionHasPathUsage(section, observedPaths);
+    if (cmdUsed || pathUsed) continue;
+
+    findings.push({
+      pattern_type: "claudemd-unused-section",
+      evidence: `CLAUDE.md section "${section.title}" references commands/paths never observed across ${agg.session_count} sessions in this project. Candidate for archival.`,
+      session_ids: agg.session_ids,
+      session_count: agg.session_count,
+      trend: computeTrend(agg.session_ids, tsMap),
+      estimated_tokens: 0,
+      recommended_surface: "project-claude-md",
+      fingerprint: {
+        pattern_type: "claudemd-unused-section",
+        target_file: claudeMdPath,
+        primary_key: section.title,
+      },
+    });
+  }
+
+  return findings;
+}
+
+export function detectClaudeMdUndocumentedRepeat(
+  agg: ProjectAggregate,
+  projectPath: string,
+  memoryDir: string | null,
+): DetectorFinding[] {
+  const findings: DetectorFinding[] = [];
+  const threshold = agg.session_count < 10 ? 3 : 5;
+  const tsMap = buildTimestampMap(agg);
+
+  for (const [filePath, sessions] of Object.entries(agg.file_read_sessions)) {
+    if (sessions.length < threshold) continue;
+    if (filePath.includes(".claude-mem") || filePath.includes(".claude/plugins")) continue;
+    if (!pathIsDocumented(filePath, projectPath, memoryDir)) continue;
+
+    findings.push({
+      pattern_type: "claudemd-undocumented-repeat",
+      evidence: `File ${filePath} read in ${sessions.length} sessions despite being mentioned in CLAUDE.md or memory. Doc exists but isn't being followed — either the reference doesn't surface in-context, or the cached value is stale.`,
+      session_ids: sessions,
+      session_count: sessions.length,
+      trend: computeTrend(sessions, tsMap),
+      estimated_tokens: sessions.length * 200,
+      recommended_surface: "memory",
+      fingerprint: {
+        pattern_type: "claudemd-undocumented-repeat",
+        target_file: filePath,
+        primary_key: filePath,
       },
     });
   }
@@ -523,21 +650,35 @@ export function detectContextBloat(
   if (bloated.length < 3) return [];
 
   const claudeMdPath = join(canonicalPath, "CLAUDE.md");
+  const claudeMdRead = safeReadFile(claudeMdPath);
   let claudeMdLines = 0;
-  if (existsSync(claudeMdPath)) {
-    try {
-      claudeMdLines = readFileSync(claudeMdPath, "utf-8").split("\n").length;
-    } catch {}
+  let claudeMdState: "missing" | "unreadable" | "present" = "missing";
+  if (claudeMdRead.ok) {
+    claudeMdLines = claudeMdRead.content.split("\n").length;
+    claudeMdState = "present";
+  } else if (claudeMdRead.reason === "unreadable") {
+    claudeMdState = "unreadable";
   }
 
-  if (claudeMdLines >= 50) return [];
+  // Don't return early on unreadable: a high-bloat project with an unreadable
+  // CLAUDE.md is exactly the kind of degraded state the finding should surface.
+  if (claudeMdState === "present" && claudeMdLines >= 50) return [];
 
   const avgRatio = bloated.reduce((sum, d) => sum + d.bloatRatio, 0) / bloated.length;
   const sessionIds = bloated.map((d) => d.sessionId);
 
+  let mdEvidence: string;
+  if (claudeMdState === "missing") {
+    mdEvidence = "CLAUDE.md missing";
+  } else if (claudeMdState === "unreadable") {
+    mdEvidence = "CLAUDE.md unreadable";
+  } else {
+    mdEvidence = `CLAUDE.md ${claudeMdLines} lines`;
+  }
+
   return [{
     pattern_type: "context-bloat",
-    evidence: `${bloated.length} sessions with bloatRatio > 2.0 (avg ${avgRatio.toFixed(1)}), CLAUDE.md ${claudeMdLines === 0 ? "missing" : `${claudeMdLines} lines`}`,
+    evidence: `${bloated.length} sessions with bloatRatio > 2.0 (avg ${avgRatio.toFixed(1)}), ${mdEvidence}`,
     session_ids: sessionIds,
     session_count: bloated.length,
     trend: "steady" as TrendDirection,
@@ -550,11 +691,6 @@ export function detectContextBloat(
     },
   }];
 }
-
-// ---------------------------------------------------------------------------
-// Vault detection
-// ---------------------------------------------------------------------------
-
 export function resolveVaultPath(): string | null {
   try {
     const pluginDir = join(
@@ -587,11 +723,6 @@ export function resolveVaultPath(): string | null {
     return null;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Report output
-// ---------------------------------------------------------------------------
-
 export function resolveReportDir(): string {
   const vault = resolveVaultPath();
   let dir: string;
@@ -680,6 +811,46 @@ function formatSkillCandidates(items: DetectorFinding[]): string {
   return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
 }
 
+function formatAllowlistGaps(items: DetectorFinding[]): string {
+  const title = "Allowlist Gaps";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Suggested Pattern | Sessions | Trend |\n|-------------------|----------|-------|";
+  const rows = items.map(
+    (f) => `| \`${f.fingerprint.primary_key}\` | ${f.session_count} | ${trendArrow(f.trend)} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatClaudeMdUnusedSections(items: DetectorFinding[]): string {
+  const title = "CLAUDE.md Unused Sections";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Section | Sessions Analyzed |\n|---------|-------------------|";
+  const rows = items.map(
+    (f) => `| "${f.fingerprint.primary_key}" | ${f.session_count} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatClaudeMdUndocumentedRepeat(items: DetectorFinding[]): string {
+  const title = "CLAUDE.md: Doc Exists But Isn't Followed";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| File | Re-read Sessions | Est. Tokens | Trend |\n|------|------------------|-------------|-------|";
+  const rows = items.map(
+    (f) => `| ${tildefy(f.fingerprint.primary_key)} | ${f.session_count} | ~${f.estimated_tokens.toLocaleString()} | ${trendArrow(f.trend)} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
+function formatRuleDrift(items: DetectorFinding[]): string {
+  const title = "Rule Drift (cron only)";
+  if (items.length === 0) return `## ${title}\n\n(none)\n`;
+  const header = "| Rule | Status |\n|------|--------|";
+  const rows = items.map(
+    (f) => `| ${f.fingerprint.primary_key} | ${f.evidence.split(".")[0]} |`,
+  );
+  return `## ${title}\n\n${header}\n${rows.join("\n")}\n`;
+}
+
 function formatContextBloat(items: DetectorFinding[]): string {
   const title = "Context Bloat (cron only)";
   if (items.length === 0) return `## ${title}\n\n(none)\n`;
@@ -707,11 +878,15 @@ export function writeReport(
   const sections = [
     formatRepeatedFileReads(findingsOfType(findings, "repeated-file-read")),
     formatCommandErrors(findingsOfType(findings, "command-error")),
+    formatAllowlistGaps(findingsOfType(findings, "allowlist-gap")),
+    formatClaudeMdUnusedSections(findingsOfType(findings, "claudemd-unused-section")),
+    formatClaudeMdUndocumentedRepeat(findingsOfType(findings, "claudemd-undocumented-repeat")),
     formatFilePairCoOccurrence(findingsOfType(findings, "file-pair-co-occurrence")),
     formatCrossProjectPaths(findingsOfType(findings, "cross-project-path")),
     formatUserMessageFrequency(findingsOfType(findings, "user-message-frequency")),
     formatSkillCandidates(findingsOfType(findings, "skill-candidate")),
     formatContextBloat(findingsOfType(findings, "context-bloat")),
+    formatRuleDrift(findingsOfType(findings, "rule-drift")),
   ];
 
   const pendingLine = pendingFileCount !== undefined ? `\npending_files: ${pendingFileCount}` : "";

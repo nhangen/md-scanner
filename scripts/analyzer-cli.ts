@@ -17,7 +17,14 @@ import {
   detectUserMessageFrequency,
   detectSkillCandidates,
   detectContextBloat,
+  detectAllowlistGaps,
+  detectClaudeMdUnusedSections,
+  detectClaudeMdUndocumentedRepeat,
+  claudeProjectDirId,
 } from "./analyzer";
+import { loadExistingAllowlist } from "./allowlist";
+import { detectRuleDrift } from "./rule-drift";
+import { getDegradedReadStats, resetDegradedReadStats } from "./safe-read";
 import type { DetectorFinding, ProjectAggregate } from "./types";
 
 const STATE_DIR = join(process.env.HOME ?? "~", ".claude", "context-gaps");
@@ -162,14 +169,28 @@ async function main(): Promise<void> {
   for (const [canonical, agg] of aggregates) {
     if (agg.session_count < 2) continue;
 
+    const existingAllowlist = loadExistingAllowlist(canonical);
+    const claudeMdPath = join(canonical, "CLAUDE.md");
+    const memoryDir = join(
+      process.env.HOME ?? "~",
+      ".claude",
+      "projects",
+      claudeProjectDirId(canonical),
+      "memory",
+    );
+
     const rawFindings: DetectorFinding[] = [
       ...detectRepeatedFileReads(agg),
       ...detectCommandErrors(agg),
+      ...detectAllowlistGaps(agg, existingAllowlist),
+      ...detectClaudeMdUnusedSections(agg, claudeMdPath),
+      ...detectClaudeMdUndocumentedRepeat(agg, canonical, memoryDir),
       ...detectFilePairCoOccurrence(agg),
       ...detectCrossProjectPaths(agg),
       ...detectUserMessageFrequency(agg),
       ...detectSkillCandidates(agg),
       ...detectContextBloat(canonical, bloatData),
+      ...(mode === "cron" ? detectRuleDrift() : []),
     ];
 
     const findings = applyTrendToFindings(rawFindings, tsMap);
@@ -184,6 +205,18 @@ async function main(): Promise<void> {
   saveIndex(INDEX_PATH, updatedIndex);
 
   log(`done: ${reportsWritten} reports, ${totalFindings} total findings, mode=${mode}`);
+
+  const degraded = getDegradedReadStats();
+  if (degraded.count > 0) {
+    log(`DEGRADED: ${degraded.count} reads failed during this run (analyzer output is partial)`);
+    for (const sample of degraded.samples) {
+      log(`  ${sample.reason}: ${sample.path}${sample.error ? ` (${sample.error})` : ""}`);
+    }
+    process.stderr.write(
+      `md-scanner: ${degraded.count} read failure(s) during run; see ${LOG_PATH} for details\n`,
+    );
+  }
+  resetDegradedReadStats();
 }
 
 main().catch((err) => {
