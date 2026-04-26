@@ -24,6 +24,7 @@ import {
   formatAllowPattern,
   isAutoAllowed,
   isArbitraryCode,
+  isWriteShaped,
 } from "./allowlist";
 import {
   parseClaudeMdSections,
@@ -403,6 +404,7 @@ export function detectAllowlistGaps(
     if (sessions.length < 3) continue;
     if (isAutoAllowed(key)) continue;
     if (isArbitraryCode(key)) continue;
+    if (isWriteShaped(key)) continue;
 
     const pattern = formatAllowPattern(key);
     if (existingAllowlist.has(pattern)) continue;

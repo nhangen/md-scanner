@@ -52,6 +52,74 @@ const ARBITRARY_CODE_EXECUTORS = new Set([
   "/bin/bash", "/bin/sh", "/bin/zsh",
 ]);
 
+// Single-token commands that mutate the filesystem or system state. Even at
+// high frequency, these are not safe to allowlist without explicit user
+// review — auto-allowlisting them would convert "ran rm 50 times" into
+// "permission to run rm without prompting forever".
+const WRITE_SHAPED_HEADS = new Set([
+  // Filesystem
+  "rm", "rmdir", "mv", "cp", "mkdir", "ln", "touch", "chmod", "chown", "chgrp",
+  "dd", "shred", "truncate",
+  // Process
+  "kill", "pkill", "killall",
+  // Archive (writes)
+  "tar", "zip", "unzip", "gunzip", "gzip",
+  // Network writes
+  "curl", "wget", "scp", "rsync",
+  // Containers (mutate state)
+  "docker", "podman", "kubectl",
+  // Git mutating verbs (when used at root level — rare without subcommand)
+  "git",
+]);
+
+// Two-token (head + subcommand) write-shaped commands that we explicitly
+// reject even if the head is auto-allowed in some other context. The
+// auto-allow set covers `git status / log / diff / show / blame / branch /
+// tag / remote` etc.; everything mutating in the git/gh/docker namespaces
+// is enumerated here.
+const WRITE_SHAPED_PAIRS = new Set([
+  // git
+  "git push", "git commit", "git merge", "git rebase", "git reset",
+  "git apply", "git rm", "git mv", "git stash", "git checkout", "git switch",
+  "git restore", "git revert", "git cherry-pick", "git pull", "git fetch",
+  "git clean", "git gc", "git filter-branch", "git tag",
+  // gh (mutating)
+  "gh pr create", "gh pr edit", "gh pr merge", "gh pr close", "gh pr reopen",
+  "gh pr review", "gh pr comment", "gh pr ready", "gh pr checkout",
+  "gh issue create", "gh issue edit", "gh issue close", "gh issue reopen",
+  "gh issue comment", "gh issue transfer", "gh issue delete",
+  "gh repo create", "gh repo delete", "gh repo edit", "gh repo fork",
+  "gh repo clone", "gh repo rename", "gh repo archive", "gh repo unarchive",
+  "gh release create", "gh release edit", "gh release delete", "gh release upload",
+  "gh secret set", "gh secret delete", "gh variable set", "gh variable delete",
+  "gh workflow run", "gh workflow enable", "gh workflow disable",
+  "gh run cancel", "gh run delete", "gh run rerun",
+  "gh auth login", "gh auth logout", "gh auth refresh",
+  // docker (mutating)
+  "docker run", "docker exec", "docker rm", "docker rmi", "docker stop",
+  "docker start", "docker restart", "docker kill", "docker pull", "docker push",
+  "docker build", "docker tag", "docker commit", "docker save", "docker load",
+  "docker network", "docker volume", "docker compose",
+  // package managers
+  "npm install", "npm uninstall", "npm publish", "npm run", "npm exec",
+  "npm update", "npm audit", "npm link", "npm version",
+  "yarn add", "yarn remove", "yarn install", "yarn publish", "yarn run",
+  "pnpm add", "pnpm remove", "pnpm install", "pnpm publish", "pnpm run",
+  "bun add", "bun remove", "bun install", "bun publish", "bun update",
+  "pip install", "pip uninstall", "pip3 install", "pip3 uninstall",
+  "composer install", "composer update", "composer require", "composer remove",
+  "cargo install", "cargo build", "cargo run", "cargo publish",
+  "go install", "go build", "go run", "go get",
+  "gem install", "gem uninstall", "gem build", "gem push",
+  "brew install", "brew uninstall", "brew upgrade", "brew tap",
+  // wp-cli (mutating)
+  "wp plugin install", "wp plugin activate", "wp plugin deactivate",
+  "wp plugin delete", "wp theme install", "wp theme activate",
+  "wp post create", "wp post update", "wp post delete",
+  "wp user create", "wp user delete", "wp user update",
+  "wp option update", "wp option delete", "wp eval", "wp eval-file",
+]);
+
 // MCP write-pattern markers — surfaces with these substrings get filtered.
 const MCP_WRITE_MARKERS = ["create", "update", "delete", "set", "remove", "add", "post", "patch", "put", "send"];
 
@@ -117,6 +185,27 @@ export function isAutoAllowed(key: string): boolean {
 export function isArbitraryCode(key: string): boolean {
   const head = key.split(" ")[0];
   return ARBITRARY_CODE_EXECUTORS.has(head);
+}
+
+/**
+ * Returns true if the key represents a mutating/write-shaped command. Allowlisting
+ * write-shaped commands is unsafe regardless of frequency — running `rm` 50 times
+ * doesn't make permanent permission to run `rm` any safer.
+ *
+ * Detection is pattern-based:
+ *   - Single-token keys (e.g., "rm", "kill", "docker") fail if the head is
+ *     in WRITE_SHAPED_HEADS
+ *   - Two-token keys (e.g., "git push", "npm install") fail if the full pair
+ *     is in WRITE_SHAPED_PAIRS, OR the head is in WRITE_SHAPED_HEADS without
+ *     a known read-only pair (defensive — unknown subcommands of mutating
+ *     tools are treated as mutating)
+ */
+export function isWriteShaped(key: string): boolean {
+  const tokens = key.split(" ");
+  const head = tokens[0];
+  if (WRITE_SHAPED_HEADS.has(head)) return true;
+  if (tokens.length >= 2 && WRITE_SHAPED_PAIRS.has(`${head} ${tokens[1]}`)) return true;
+  return false;
 }
 
 /**

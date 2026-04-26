@@ -414,6 +414,7 @@ import {
   commandToAllowlistKey,
   isAutoAllowed,
   isArbitraryCode,
+  isWriteShaped,
   formatAllowPattern,
   isReadOnlyMcp,
 } from "./allowlist";
@@ -498,6 +499,53 @@ describe("isArbitraryCode", () => {
   });
 });
 
+describe("isWriteShaped", () => {
+  test("rejects single-token write-shaped heads", () => {
+    expect(isWriteShaped("rm")).toBe(true);
+    expect(isWriteShaped("rm -rf")).toBe(true); // pair with -rf still rejected via head
+    expect(isWriteShaped("kill")).toBe(true);
+    expect(isWriteShaped("chmod")).toBe(true);
+    expect(isWriteShaped("curl")).toBe(true);
+    expect(isWriteShaped("docker")).toBe(true);
+  });
+
+  test("rejects mutating 2-token git/docker pairs", () => {
+    // Note: gh pr/issue/repo/release subcommands aggregate at 2 tokens (`gh pr`)
+    // and are blocked at the auto-allow gate, not the write-shape gate. The
+    // 3-token entries in WRITE_SHAPED_PAIRS (`gh pr create`, `gh repo delete`)
+    // are documentation for a future 3-token aggregation; they don't fire at
+    // current aggregation granularity.
+    expect(isWriteShaped("git push")).toBe(true);
+    expect(isWriteShaped("git commit")).toBe(true);
+    expect(isWriteShaped("git rebase")).toBe(true);
+    expect(isWriteShaped("git rm")).toBe(true);
+    expect(isWriteShaped("docker run")).toBe(true);
+    expect(isWriteShaped("docker push")).toBe(true);
+  });
+
+  test("rejects package-manager mutations", () => {
+    expect(isWriteShaped("npm install")).toBe(true);
+    expect(isWriteShaped("yarn add")).toBe(true);
+    expect(isWriteShaped("pnpm remove")).toBe(true);
+    expect(isWriteShaped("composer install")).toBe(true);
+    expect(isWriteShaped("brew install")).toBe(true);
+  });
+
+  test("rejects defensively when head is mutating but subcommand is unknown", () => {
+    // git is in WRITE_SHAPED_HEADS — anything starting with git that's not
+    // explicitly auto-allowed (status/log/diff etc.) gets rejected by the
+    // head check
+    expect(isWriteShaped("git frobnicate")).toBe(true);
+  });
+
+  test("does not reject read-only commands", () => {
+    expect(isWriteShaped("composer phpcs")).toBe(false);
+    expect(isWriteShaped("ls")).toBe(false);
+    expect(isWriteShaped("cat")).toBe(false);
+    expect(isWriteShaped("/Users/nh/scan-prs.sh")).toBe(false);
+  });
+});
+
 describe("formatAllowPattern", () => {
   test("wraps key in Bash() with wildcard suffix", () => {
     expect(formatAllowPattern("gh pr")).toBe("Bash(gh pr *)");
@@ -559,6 +607,19 @@ describe("detectAllowlistGaps", () => {
     expect(detectAllowlistGaps(agg, new Set())).toHaveLength(0);
   });
 
+  test("filters out write-shaped commands even at high frequency", () => {
+    const agg = makeAgg({
+      bash_command_pair_sessions: {
+        "rm -rf": ["s1", "s2", "s3", "s4", "s5"],
+        "git push": ["s1", "s2", "s3", "s4", "s5"],
+        "npm install": ["s1", "s2", "s3", "s4", "s5"],
+        "docker run": ["s1", "s2", "s3", "s4", "s5"],
+        "wp eval": ["s1", "s2", "s3", "s4", "s5"],
+      },
+    });
+    expect(detectAllowlistGaps(agg, new Set())).toHaveLength(0);
+  });
+
   test("skips entries already present in the allowlist (wildcard form)", () => {
     const agg = makeAgg({
       bash_command_pair_sessions: {
@@ -583,12 +644,12 @@ describe("detectAllowlistGaps", () => {
     const agg = makeAgg({
       bash_command_pair_sessions: {
         "composer phpcs": ["s1", "s2", "s3"],
-        "npm install": ["s1", "s2", "s3", "s4", "s5", "s6"],
+        "bin/phpunit": ["s1", "s2", "s3", "s4", "s5", "s6"],
       },
     });
     const findings = detectAllowlistGaps(agg, new Set());
     expect(findings).toHaveLength(2);
-    expect(findings[0].fingerprint.primary_key).toBe("Bash(npm install *)");
+    expect(findings[0].fingerprint.primary_key).toBe("Bash(bin/phpunit *)");
     expect(findings[1].fingerprint.primary_key).toBe("Bash(composer phpcs *)");
   });
 });
