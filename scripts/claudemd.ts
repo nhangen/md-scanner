@@ -3,8 +3,8 @@
 // Two detectors live in analyzer.ts that use this module:
 //
 //   detectClaudeMdUnusedSection — flags ## sections in the project's CLAUDE.md
-//     whose content (commands, file paths, rule references) never appears in
-//     transcripts. Candidate-for-archival signal.
+//     whose content (commands or file paths) never appears in transcripts.
+//     Candidate-for-archival signal.
 //
 //   detectClaudeMdUndocumentedRepeat — refines existing repeated-file-read
 //     findings by checking whether the file is mentioned in CLAUDE.md or
@@ -23,12 +23,10 @@ export interface ClaudeMdSection {
   // Tokens extracted from body for matching against transcript data:
   commands: string[]; // bash-shaped (`gh pr view`, `composer phpcs`)
   paths: string[];    // absolute or `~/`-prefixed paths
-  rule_refs: string[]; // referenced rule names (`safety-invariant-scope`)
 }
 
 const COMMAND_PATTERN = /`([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z][a-zA-Z0-9_-]*)?(?:\s+[a-zA-Z][a-zA-Z0-9_-]*)?)`/g;
 const PATH_PATTERN = /`((?:\/|~\/)[A-Za-z0-9_./~-]+)`/g;
-const RULE_REF_PATTERN = /`([a-z][a-z0-9-]+(?:-[a-z0-9]+)+)`/g;
 
 /**
  * Parse a CLAUDE.md (or any md file) into its `## ` sections. Each section
@@ -62,7 +60,6 @@ export function parseClaudeMdSections(filePath: string): ClaudeMdSection[] {
       body,
       commands: extractCommands(body),
       paths: extractPaths(body),
-      rule_refs: extractRuleRefs(body),
     });
     currentTitle = null;
     currentBody = [];
@@ -97,18 +94,6 @@ function extractPaths(body: string): string[] {
   const out: string[] = [];
   for (const m of body.matchAll(PATH_PATTERN)) {
     out.push(m[1].trim());
-  }
-  return out;
-}
-
-function extractRuleRefs(body: string): string[] {
-  const out: string[] = [];
-  for (const m of body.matchAll(RULE_REF_PATTERN)) {
-    const ref = m[1].trim();
-    // hyphenated kebab-case-only — looks like a rule name (vs. `gh pr` which has space)
-    if (ref.length < 5) continue;
-    if (ref.includes(".")) continue; // file extensions, version numbers
-    out.push(ref);
   }
   return out;
 }

@@ -733,14 +733,13 @@ describe("parseClaudeMdSections", () => {
     }
   });
 
-  test("extracts paths and rule refs", () => {
+  test("extracts paths", () => {
     const { projectPath, cleanup } = makeTempProject(
-      "## Rules\n\nSee `~/.claude/rules/safety-invariant-scope.md` and `safety-invariant-scope`.\n",
+      "## Rules\n\nSee `~/.claude/rules/safety-invariant-scope.md` for details.\n",
     );
     try {
       const sections = parseClaudeMdSections(`${projectPath}/CLAUDE.md`);
       expect(sections[0].paths.length).toBeGreaterThan(0);
-      expect(sections[0].rule_refs).toContain("safety-invariant-scope");
     } finally {
       cleanup();
     }
@@ -763,22 +762,22 @@ describe("normalizePath", () => {
 
 describe("sectionHasCommandUsage", () => {
   test("matches when section command appears in observed keys", () => {
-    const section = { title: "X", body: "", commands: ["gh pr view"], paths: [], rule_refs: [] };
+    const section = { title: "X", body: "", commands: ["gh pr view"], paths: [] };
     expect(sectionHasCommandUsage(section, new Set(["gh pr"]))).toBe(true);
   });
 
   test("matches single-token section command against pair head", () => {
-    const section = { title: "X", body: "", commands: ["composer"], paths: [], rule_refs: [] };
+    const section = { title: "X", body: "", commands: ["composer"], paths: [] };
     expect(sectionHasCommandUsage(section, new Set(["composer phpcs"]))).toBe(true);
   });
 
   test("returns false when no commands match", () => {
-    const section = { title: "X", body: "", commands: ["gh pr view"], paths: [], rule_refs: [] };
+    const section = { title: "X", body: "", commands: ["gh pr view"], paths: [] };
     expect(sectionHasCommandUsage(section, new Set(["git status"]))).toBe(false);
   });
 
   test("returns false when section has no commands (caller falls through to path check)", () => {
-    const section = { title: "X", body: "prose only", commands: [], paths: [], rule_refs: [] };
+    const section = { title: "X", body: "prose only", commands: [], paths: [] };
     expect(sectionHasCommandUsage(section, new Set())).toBe(false);
   });
 });
