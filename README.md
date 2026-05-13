@@ -1,61 +1,55 @@
 # md-scanner
 
-Scans your markdown documentation (CLAUDE.md, rules, memory files) against actual behavioral data to find what's missing. Recommends specific additions via a guided walkthrough.
+**Behavioral audit for your Claude Code markdown — finds what's missing from CLAUDE.md, rules, and memory by analyzing what actually happens during sessions.**
 
-## The Problem
+## Why
 
 You keep telling Claude the same things session after session. You re-read the same files. You retry the same commands. Your CLAUDE.md has good structure but is missing the context that would actually save time.
 
-Existing tools check if your docs are well-formed. md-scanner checks if they're **useful** — by analyzing what actually happens during sessions.
+Existing tools check if your docs are well-formed. md-scanner checks if they're useful — by parsing session transcripts, correlating with token-scope / RTK / claude-mem, and surfacing patterns that should have been documented.
 
-## How It Works
+## How it works
 
-**Session tagger** (Stop hook) — after each session, parses the JSONL transcript and extracts:
-- Files read and how often
-- Bash commands and which ones failed
-- User messages (what you kept telling Claude)
-- Files edited together
-- Tool call sequences
-- Out-of-project path access
+A `Stop` hook runs after every session, parses the JSONL transcript, and writes a structured extract to `~/.claude/context-gaps/pending-<session_id>.jsonl`. The `/md-scanner` skill correlates those extracts across sessions, diffs against your current docs, routes each finding to the right surface (project CLAUDE.md, global CLAUDE.md, rule file, memory, or skill candidate), and walks you through approve / skip / edit / defer.
 
-**`/md-scanner` skill** — on demand, correlates patterns across sessions:
-- Cross-references with token-scope (context bloat), RTK (command failures), and claude-mem (recurring concepts)
-- Diffs findings against your current CLAUDE.md, rules, and memory files
-- Routes each recommendation to the right surface
-- Walks you through approve/skip/edit/defer for each one
+## Skills
 
-## What It Detects
+| Skill | Trigger | Purpose |
+|-------|---------|---------|
+| `md-scanner` | `/md-scanner` | Full guided walkthrough across all pending extracts |
+| `md-scanner` | `/md-scanner review` | Re-surface previously deferred items only |
+| `md-scanner` | `/md-scanner report` | Non-interactive summary table — no prompts |
+
+## Hooks
+
+| Event | Script | Purpose |
+|-------|--------|---------|
+| `Stop` | `hooks/context-gaps-tagger.sh` | Parse the session JSONL and write a per-session extract to `~/.claude/context-gaps/` |
+
+## Detected patterns
 
 | Pattern | Signal | Example |
 |---------|--------|---------|
-| Repeated file reads | Same file read in 5+ sessions | "AnalyticsResource.php read in 11 of 15 sessions" |
-| Command trial-and-error | Same binary fails across sessions | "npm run build fails in 3 sessions, npm run build:dev succeeds" |
-| Repeated user statements | You keep saying the same thing | "update obsidian" said in 7 of 18 sessions |
-| Context bloat | Sessions start expensive | "bloatRatio > 2.0 in 4 sessions, CLAUDE.md is 30 lines" |
-| Undocumented concepts | Concepts in observations but not in docs | "Mozart vendoring in 10 observations, not in CLAUDE.md" |
-| File pair co-occurrence | Files always edited together | "Checkout.php + PlanResource.php in 5 sessions" |
-| Cross-project confusion | Wrong repo paths accessed | "/other/wp-content/file.php from this project in 3 sessions" |
-| Skill candidates | Repeated tool sequences | "Read x4, Grep x2, Edit, Bash x3 in 4 sessions" |
+| Repeated file reads | Same file read in 5+ sessions | `AnalyticsResource.php` read in 11 of 15 sessions |
+| Command trial-and-error | Same binary fails across sessions | `npm run build` fails in 3 sessions, `npm run build:dev` succeeds |
+| Repeated user statements | Same instruction repeated | "update obsidian" said in 7 of 18 sessions |
+| Context bloat | Sessions start expensive | `bloatRatio > 2.0` in 4 sessions, CLAUDE.md is 30 lines |
+| Undocumented concepts | Concepts in observations but not in docs | "Mozart vendoring" in 10 observations, not in CLAUDE.md |
+| File pair co-occurrence | Files always edited together | `Checkout.php` + `PlanResource.php` in 5 sessions |
+| Cross-project confusion | Wrong repo paths accessed | `/other/wp-content/file.php` from this project in 3 sessions |
+| Skill candidates | Repeated tool sequences | Read x4, Grep x2, Edit, Bash x3 in 4 sessions |
 
-## Where It Routes
+## Routing
 
 | Condition | Target |
 |-----------|--------|
-| Single project pattern | Project CLAUDE.md |
+| Single-project pattern | Project `CLAUDE.md` |
 | Cross-project pattern | `~/.claude/CLAUDE.md` |
 | Behavioral constraint | `~/.claude/rules/<name>.md` |
-| Environment/tool context | Memory file |
+| Environment / tool context | Memory file |
 | Repeated workflow | Skill candidate (flagged for review) |
 
-## Usage
-
-```
-/md-scanner              Full guided walkthrough
-/md-scanner review       Deferred items only
-/md-scanner report       Non-interactive summary table
-```
-
-### Example walkthrough
+## Examples
 
 ```
 --- Recommendation 1 of 6 ---
@@ -78,49 +72,68 @@ Approve, skip, edit, defer, or quit (defers remaining)?
 
 ## Install
 
-### As a global skill (recommended)
+Via the Claude Code plugin marketplace:
 
-```bash
-# Copy the skill
-mkdir -p ~/.claude/skills/md-scanner
-cp skill/SKILL.md ~/.claude/skills/md-scanner/SKILL.md
-
-# Install tagger dependencies
-bun install
-
-# Add Stop hook to settings.json (add to hooks.Stop array)
-# {
-#   "type": "command",
-#   "command": "bash \"/path/to/md-scanner/hooks/context-gaps-tagger.sh\"",
-#   "timeout": 5000
-# }
+```
+/plugin install md-scanner@nhangen
 ```
 
-### Data sources (optional, enhance detection)
+Manual install (skill + hook only):
 
-- **token-scope** — context bloat detection (`token-scope --context --json`)
-- **RTK** — command failure patterns (`rtk discover`)
-- **claude-mem** — recurring concepts and feedback observations
+```bash
+mkdir -p ~/.claude/skills/md-scanner
+cp skill/SKILL.md ~/.claude/skills/md-scanner/SKILL.md
+bun install
+```
 
-The skill degrades gracefully if any are missing.
+Then add the Stop hook to `~/.claude/settings.json`:
+
+```json
+{
+  "type": "command",
+  "command": "bash \"/path/to/md-scanner/hooks/context-gaps-tagger.sh\"",
+  "timeout": 5000
+}
+```
+
+## Development
+
+```bash
+bun install
+bun test                 # tagger + analyzer tests
+bun run typecheck        # tsc --noEmit
+bun run analyze          # run analyzer-cli.ts against pending extracts
+bun run setup-cron       # install a cron job to run the analyzer periodically
+```
+
+## Optional data sources
+
+The analyzer degrades gracefully when these are missing — install them to enrich detection.
+
+| Source | Adds |
+|--------|------|
+| [token-scope](https://github.com/nhangen/token-scope) | Context bloat per session (`token-scope --context --json`) |
+| [RTK](https://github.com/nhangen/rtk) | Command failure patterns (`rtk discover`) |
+| [claude-mem](https://github.com/thedotmack/claude-mem) | Recurring concepts and feedback observations |
 
 ## State
 
 All state lives in `~/.claude/context-gaps/`:
 
-```
-pending-<session_id>.jsonl   — raw session extracts (one per session)
-applied.jsonl                — accepted recommendations (won't re-suggest)
-dismissed.jsonl              — skipped recommendations (won't re-suggest)
-deferred.jsonl               — saved for /md-scanner review
-```
+| File | Purpose |
+|------|---------|
+| `pending-<session_id>.jsonl` | Raw session extracts, one file per session |
+| `applied.jsonl` | Accepted recommendations (won't re-suggest) |
+| `dismissed.jsonl` | Skipped recommendations (won't re-suggest) |
+| `deferred.jsonl` | Saved for `/md-scanner review` |
 
 Records auto-expire after 90 days.
 
-## Requirements
+## Known limitations
 
-- Bun 1.1.0+
-- Claude Code with Stop hook support
+- Requires Bun 1.1.0+ — the tagger and analyzer are written in TypeScript executed via Bun.
+- The Stop hook reads the full session JSONL; very large transcripts (>50MB) increase Stop-event latency.
+- Skill candidate detection is conservative — it flags repeated tool sequences but doesn't auto-generate skill scaffolds.
 
 ## License
 
