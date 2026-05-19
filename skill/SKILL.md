@@ -86,6 +86,22 @@ Apply these detectors in order. For each, check the exclusion set — skip if fi
 
 **5. Undocumented concepts** — From claude-mem observations, find concept tags appearing in 5+ observations that don't match any keyword in the project's CLAUDE.md (case-insensitive substring match). Evidence: concept name, observation count, sample observation titles.
 
+**5b. CLAUDE.md drift via graph_file_history** — Stronger signal than #5 for the project CLAUDE.md case. For each project's CLAUDE.md path (e.g. `/Users/nhangen/Local Sites/appoptinmonstertest/app/public/CLAUDE.md`), call:
+
+```
+mcp__plugin_claude-mem-graph_claude-mem-graph__graph_file_history({
+  file_path: "<absolute path to CLAUDE.md>"
+})
+```
+
+`graph_file_history` does **exact-match lookup** on the file path — pass the literal path the user has edited, not a guessed or relative one. Returns observations grouped by project that have `touches` edges to that file.
+
+For each touching observation, extract its `concepts` field. Check membership in current CLAUDE.md text (case-insensitive substring). Surface concepts present in 2+ touching observations but absent from CLAUDE.md as `claudemd-touch-drift` — these are concepts the user thought worth recording at the time of editing the doc, but whose names didn't make it into the final text. Stronger signal than #5 because the underlying observation actually modified the doc.
+
+Evidence: concept name, touching-observation count, observation IDs and titles, CLAUDE.md line count at time of touch (if available).
+
+**If claude-mem-graph is unavailable** (MCP error or version < v0.2.3): skip this pattern silently and fall through to pattern #5 only. No warning needed.
+
 **6. File pair co-occurrence** — File pairs appearing in the same edit set in 3+ sessions. Evidence: the two files, session count.
 
 **7. Cross-project confusion** — Out-of-project paths appearing in 2+ sessions from the same project. Evidence: the wrong path, the project it was accessed from, session count.
