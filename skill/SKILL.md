@@ -12,9 +12,9 @@ Analyzes session history to find patterns where missing documentation caused was
 ## Usage
 
 ```
-/context-gaps              Full walkthrough
-/context-gaps review       Deferred items only
-/context-gaps report       Non-interactive summary
+/md-scanner              Full walkthrough
+/md-scanner review       Deferred items only
+/md-scanner report       Non-interactive summary
 ```
 
 ## Data Sources
@@ -164,7 +164,7 @@ Handle responses:
 - **approve** → Apply the edit using the Edit tool (or Write for new files). Read the target file first to find the right insertion point. Append a record to `~/.claude/context-gaps/applied.jsonl`.
 - **skip** → Append to `~/.claude/context-gaps/dismissed.jsonl`. Will not resurface.
 - **edit** → User describes changes. Revise the proposed text. Present again for approval.
-- **defer** → Append to `~/.claude/context-gaps/deferred.jsonl`. Resurfaces on `/context-gaps review`.
+- **defer** → Append to `~/.claude/context-gaps/deferred.jsonl`. Resurfaces on `/md-scanner review`.
 - **quit** → Defer all remaining recommendations.
 
 For rules: follow the creating-rules process in `~/.cursor/rules/creating-rules.mdc` — create the `.md` file with frontmatter, add matching section to `~/.claude/CLAUDE.md`.

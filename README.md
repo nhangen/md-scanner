@@ -38,6 +38,10 @@ A `Stop` hook runs after every session, parses the JSONL transcript, and writes 
 | File pair co-occurrence | Files always edited together | `Checkout.php` + `PlanResource.php` in 5 sessions |
 | Cross-project confusion | Wrong repo paths accessed | `/other/wp-content/file.php` from this project in 3 sessions |
 | Skill candidates | Repeated tool sequences | Read x4, Grep x2, Edit, Bash x3 in 4 sessions |
+| Allowlist gap | Read-only Bash command repeats but isn't auto-allowed | `git status` ran in 5 sessions, absent from project allowlist |
+| Unused CLAUDE.md section | Section's commands/paths never observed in transcripts | Section "Deploy" never referenced across 12 sessions |
+| Undocumented repeat | File re-read despite being documented in CLAUDE.md/memory | `config.php` read in 6 sessions despite an existing memory entry |
+| Rule drift (cron-only) | Cursor and Claude rule bodies diverge | `~/.cursor/rules/foo.mdc` differs from `~/.claude/rules/foo.md` |
 
 ## Routing
 
@@ -104,6 +108,8 @@ bun test                 # tagger + analyzer tests
 bun run typecheck        # tsc --noEmit
 bun run analyze          # run analyzer-cli.ts against pending extracts
 bun run setup-cron       # install a cron job to run the analyzer periodically
+bun run setup-cron --dry-run   # print the wrapper script + crontab entry without installing
+bun run setup-cron --remove    # uninstall the cron job
 ```
 
 ## Optional data sources
