@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, statSync, renameSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import {
@@ -30,9 +30,17 @@ import type { DetectorFinding, ProjectAggregate } from "./types";
 const STATE_DIR = join(process.env.HOME ?? "~", ".claude", "context-gaps");
 const INDEX_PATH = join(STATE_DIR, "analyzer-index.json");
 const LOG_PATH = join(STATE_DIR, "analyzer.log");
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
 
 function log(message: string): void {
   try {
+    try {
+      if (statSync(LOG_PATH).size > LOG_MAX_BYTES) {
+        renameSync(LOG_PATH, LOG_PATH + ".1"); // rotate; keep one previous log
+      }
+    } catch {
+      // no existing log / stat failed — nothing to rotate
+    }
     appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
   } catch {
     // silent

@@ -692,36 +692,32 @@ export function detectContextBloat(
   }];
 }
 export function resolveVaultPath(): string | null {
-  try {
-    const pluginDir = join(
-      process.env.HOME ?? "~",
-      ".claude",
-      "plugins",
-      "cache",
-      "nhangen",
-      "obsidian",
-    );
-    const entries = readdirSync(pluginDir);
-    const versionDirs = entries.filter((e) => /^\d+\.\d+\.\d+$/.test(e));
+  // Resolve the Obsidian config the same way the obsidian plugin's
+  // resolve-config.sh does: explicit OBSIDIAN_LOCAL_MD override, then the XDG
+  // stable path. The old approach scanned the obsidian plugin's cache dir for a
+  // committed obsidian.local.md — that broke when the plugin owner was renamed
+  // to `nhangen-tools` and the real config moved to ~/.config/claude-obsidian/,
+  // so vault resolution silently returned null and reports fell back to
+  // ~/.claude/context-gaps/reports/ instead of the vault.
+  const candidates = [
+    process.env.OBSIDIAN_LOCAL_MD,
+    join(
+      process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? "~", ".config"),
+      "claude-obsidian",
+      "obsidian.local.md",
+    ),
+  ].filter((p): p is string => !!p);
 
-    if (versionDirs.length === 0) return null;
-
-    versionDirs.sort((a, b) => {
-      const ap = a.split(".").map(Number);
-      const bp = b.split(".").map(Number);
-      for (let i = 0; i < 3; i++) {
-        if (ap[i] !== bp[i]) return ap[i] - bp[i];
-      }
-      return 0;
-    });
-
-    const latest = versionDirs[versionDirs.length - 1];
-    const localMd = readFileSync(join(pluginDir, latest, "obsidian.local.md"), "utf-8");
-    const match = localMd.match(/^vault_path:\s*(.+)$/m);
-    return match ? match[1].trim() : null;
-  } catch {
-    return null;
+  for (const path of candidates) {
+    try {
+      const localMd = readFileSync(path, "utf-8");
+      const match = localMd.match(/^vault_path:\s*(.+)$/m);
+      if (match) return match[1].trim();
+    } catch {
+      // candidate missing/unreadable — try the next
+    }
   }
+  return null;
 }
 export function resolveReportDir(): string {
   const vault = resolveVaultPath();
